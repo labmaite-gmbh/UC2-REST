@@ -168,7 +168,7 @@ class LedMatrix(object):
     def setAll(self, state, intensity=None):
         # fast addressing
         # turns on all LEDs at a certain intensity
-        # state = np.sum(state)>0
+        state = np.sum(state)>0
         if intensity is not None:
             self.intensity = intensity
         intensity2display = np.array(self.intensity)*np.array(state)

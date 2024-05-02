@@ -9,41 +9,40 @@ class Home(object):
         self.direction = 1
         self.speed = 15000
         self.timeout = 20000
-        self.endstoppolarity = 1
-        
-    def home_x(self, speed = None, direction = None, endposrelease = None, endstoppolarity=None, timeout=None, isBlocking=False):
+        self.homeAxisOrder = [0,1,2,3] # motor axis is 1,2,3,0 => X,Y,Z,T # FIXME: Hardcoded
+
+    def setHomeAxisOrder(self, order=[0,1,2,3]):
+        self.homeAxisOrder = order
+
+    def home_x(self, speed = None, direction = None, endposrelease = None, timeout=None, isBlocking=False):
         # axis = 1 corresponds to 'X'
-        axis = 1
+        axis = self.homeAxisOrder[1]
         self.home(axis=axis, 
                   timeout=timeout, 
                   speed = speed, 
                   direction = direction, 
                   endposrelease=endposrelease,
-                  endstoppolarity=endstoppolarity,
                   isBlocking=isBlocking)
 
-    def home_y(self, speed = None, direction = None, endposrelease = None, endstoppolarity=None, timeout=None, isBlocking=False):
+    def home_y(self, speed = None, direction = None, endposrelease = None, timeout=None, isBlocking=False):
         # axis = 2 corresponds to 'Y'
-        axis = 2
+        axis = self.homeAxisOrder[2]
         self.home(axis=axis, 
                   timeout=timeout, 
                   speed = speed, 
                   direction = direction, 
                   endposrelease=endposrelease, 
-                  endstoppolarity=endstoppolarity,
                   isBlocking=isBlocking)    
     
-    def home_z(self, speed = None, direction = None, endposrelease = None, endstoppolarity=None, timeout=None, isBlocking=False):
-        # axisa = 3 corresponds to 'Z'
-        axis = 3
+    def home_z(self, speed = None, direction = None, endposrelease = None, timeout=None, isBlocking=False):
+        # axis = 3 corresponds to 'Z'
+        axis = self.homeAxisOrder[3]
         self.home(axis=axis, 
                   timeout=timeout, 
                   speed = speed, 
                   direction = direction, 
                   endposrelease=endposrelease, 
-                  endstoppolarity=endstoppolarity,
-                  isBlocking=isBlocking)
-
+                  isBlocking=isBlocking)    
 
     def home_az(self, speed = None, direction = None, endposrelease = None, endstoppolarity=None, timeout=None, isBlocking=False):
         '''
@@ -103,7 +102,7 @@ class Home(object):
 
         return r
 
-    def home(self, axis=None, timeout=None, speed=None, direction=None, endposrelease=None, endstoppolarity=None, isBlocking=False):
+    def home(self, axis=None, timeout=None, speed=None, direction=None, endposrelease=None, isBlocking=False):
         '''
         axis = 0,1,2,3 or 'A, 'X','Y','Z'
         timeout => when to stop homing (it's a while loop on the MCU)
@@ -121,8 +120,6 @@ class Home(object):
             endposrelease = self.endposrelease
         if timeout is None:
             timeout = self.timeout
-        if endstoppolarity is None:
-            endstoppolarity = self.endstoppolarity
 
         if direction not in [-1,1]:
             direction = 1
@@ -136,19 +133,36 @@ class Home(object):
                 "steppers": [
                 {
                  "stepperid": axis,
-                 "timeout":timeout,
+                 "timeout":timeout*1000,
                  "speed":speed,
                  "direction":direction,
-                 "endposrelease":endposrelease, 
-                 "endstoppolarity":endstoppolarity
+                 "endposrelease":endposrelease
                  }]
             }}
      
-        timeout = timeout if isBlocking else 0
-        nResponses = 2 # one for command received, one for home reached
+        # send json string
+        r = self._parent.post_json(path, payload, getReturn=True, timeout=timeout)
         
-        # if we get a return, we will receive the latest position feedback from the driver  by means of the axis that moves the longest
-        r = self._parent.post_json(path, payload, getReturn=isBlocking, timeout=timeout, nResponses=nResponses)
+        # wait until job has been done        
+        time0=time.time()
+        if isBlocking and self._parent.serial.is_connected:
+            while True:
+                time.sleep(0.05) # don'T overwhelm the CPU
+                # see if already done
+                try:
+                    rMessage = self._parent.serial.serialdevice.readline().decode() # TODO: Make sure it's compatible with all motors running at the same time
+                except Exception as e:
+                    self._parent.logger.error(e)
+                    rMessage = ""
+                # check if message contains a motor that is done already
+                if rMessage.find('isDone') >-1:
+                    break
+                if time.time()-time0>timeout:
+                    break
 
+
+        
+        
+        
         return r
 
