@@ -10,14 +10,13 @@ class Home(object):
         self.speed = 15000
         self.timeout = 20000
         self.endstoppolarity = 1
-        self.homeAxisOrder = [0,1,2,3] # motor axis is 1,2,3,0 => X,Y,Z,T # FIXME: Hardcoded
 
     def setHomeAxisOrder(self, order=[0,1,2,3]):
         self.homeAxisOrder = order
 
     def home_x(self, speed = None, direction = None, endposrelease = None, endstoppolarity=None, timeout=None, isBlocking=False):
         # axis = 1 corresponds to 'X'
-        axis = self.homeAxisOrder[1]
+        axis = 1
         self.home(axis=axis, 
                   timeout=timeout, 
                   speed = speed, 
@@ -28,7 +27,7 @@ class Home(object):
 
     def home_y(self, speed = None, direction = None, endposrelease = None, endstoppolarity=None, timeout=None, isBlocking=False):
         # axis = 2 corresponds to 'Y'
-        axis = self.homeAxisOrder[2]
+        axis = 2
         self.home(axis=axis, 
                   timeout=timeout, 
                   speed = speed, 
@@ -39,7 +38,7 @@ class Home(object):
     
     def home_z(self, speed = None, direction = None, endposrelease = None, endstoppolarity=None, timeout=None, isBlocking=False):
         # axis = 3 corresponds to 'Z'
-        axis = self.homeAxisOrder[3]
+        axis = 3
         self.home(axis=axis, 
                   timeout=timeout, 
                   speed = speed, 
@@ -153,6 +152,23 @@ class Home(object):
         
         # if we get a return, we will receive the latest position feedback from the driver  by means of the axis that moves the longest
         r = self._parent.post_json(path, payload, getReturn=isBlocking, timeout=timeout)
+
+        # wait until job has been done
+        time0=time.time()
+        if isBlocking and self._parent.serial.is_connected:
+            while True:
+                time.sleep(0.05) # don'T overwhelm the CPU
+                # see if already done
+                try:
+                    rMessage = self._parent.serial.serialdevice.readline().decode() # TODO: Make sure it's compatible with all motors running at the same time
+                except Exception as e:
+                    self._parent.logger.error(e)
+                    rMessage = ""
+                # check if message contains a motor that is done already
+                if rMessage.find('isDone') >-1:
+                    break
+                if time.time()-time0>timeout:
+                    break
 
         return r
 
