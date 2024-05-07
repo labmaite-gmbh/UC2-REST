@@ -8,7 +8,7 @@ class Home(object):
         self.endposrelease = 3000
         self.direction = 1
         self.speed = 15000
-        self.timeout = 20000
+        self.timeout = 40000
         self.endstoppolarity = 1
         
     def home_x(self, speed = None, direction = None, endposrelease = None, endstoppolarity=None, timeout=None, isBlocking=False):
