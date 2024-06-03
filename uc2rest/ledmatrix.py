@@ -3,14 +3,11 @@ import json
 import time 
 gTimeout = 1
 class LedMatrix(object):
-    def __init__(self, parent, Nx=5, Ny=5):
+    def __init__(self, parent, NLeds=64):
         #TOOD: This is for the LED matrix only!
-        self.Nx = Nx
-        self.Ny = Ny
-        self.NLeds = self.Nx*self.Ny
-
-        # #assuming we have a square grid!
-        # self.Nx = self.Ny = int(np.sqrt(NLeds))
+        self.NLeds = NLeds
+        #assuming we have a square grid!
+        self.Nx = self.Ny = int(np.sqrt(NLeds))
         
         # we assume the pattern is binary (e.g. 0 or 1)
         self.ledpattern = np.ones((self.NLeds, 3))*-1 # not set yet
@@ -44,19 +41,23 @@ class LedMatrix(object):
         Send an LED array pattern e.g. an RGB Matrix: led_pattern=np.zeros((3,8,8))
         '''
         path = '/ledarr_act'
-        # if we have a 2d pattern => flatten
-        if len(led_pattern.shape)==3:
-            led_pattern=np.reshape(led_pattern, (np.prod(led_pattern.shape[0:2]),led_pattern.shape[2])) 
 
         # convert pattern strip to list of RGB values
-        pattern_list = []
-        for i in range(led_pattern.shape[0]):
-            pattern_list.append({
-                "id": i,
-                "r": int(led_pattern[i,0]),
-                "g": int(led_pattern[i,1]),
-                "b": int(led_pattern[i,2])                        
-            })
+        if not type(led_pattern) is list:
+            # if we have a 2d pattern => flatten
+            if len(led_pattern.shape)==3:
+                led_pattern=np.reshape(led_pattern, (np.prod(led_pattern.shape[0:2]),led_pattern.shape[2])) 
+
+            pattern_list = []
+            for i in range(led_pattern.shape[0]):
+                pattern_list.append({
+                    "id": i,
+                    "r": int(led_pattern[i,0]),
+                    "g": int(led_pattern[i,1]),
+                    "b": int(led_pattern[i,2])                        
+                })
+        else:
+            pattern_list = led_pattern
 
         payload = {
             "task":path,
@@ -72,7 +73,7 @@ class LedMatrix(object):
         self.currentLedArrayMode = "array"            
         return r
 
-    def send_LEDMatrix_full(self, intensity = (255,255,255), getReturn=True, timeout=gTimeout):
+    def send_LEDMatrix_full(self, intensity = (255,255,255), getReturn=False, timeout=gTimeout):
         '''
         set all LEDs with te same RGB value: intensity=(255,255,255)
         '''
@@ -82,13 +83,15 @@ class LedMatrix(object):
             "task":path,
             "led": {
                 "led_array":[{
+                    "id": 0,
                     "r": int(intensity[0]),
                     "g": int(intensity[1]),
                     "b": int(intensity[2])}],
                 "LEDArrMode": self.ledArrayModes["full"]
             }
         }
-        
+        #{"task":"/ledarr_act", "led":{"LEDArrMode":1, "led_array":[{"id":0, "r":255, "g":255, "b":255}]}}
+        #{"task":"/ledarr_act", "led":{"LEDArrMode":1, "led_array":[{"id":0, "r": 255, "g": 255, "b": 255}]}}
         #self._parent.logger.debug("Setting LED Pattern (full): "+ str(intensity))
         r = self._parent.post_json(path, payload, getReturn=getReturn, timeout=timeout)
         if not getReturn or timeout==0:
@@ -136,7 +139,7 @@ class LedMatrix(object):
         self._parent.logger.debug("Setting LED Pattern (single) ")
         r = self._parent.post_json(path, payload, getReturn=getReturn, timeout=timeout)
         if not getReturn or timeout==0:
-            r = {"success": 1}
+            r = {"success": r}
         self.currentLedArrayMode = "single"            
         return r
 
@@ -158,39 +161,39 @@ class LedMatrix(object):
         ix = indexled//self.Nx
         iy = indexled%self.Nx
         self.ledpattern[indexled] = (state,state,state) # either [0, 1]
-        # # forward backward enumaration
-        # if ix%2 != 0:
-        #    indexled = (ix*self.Nx)+(self.Ny-iy-1)
+        # forward backward enumaration
+        if ix%2 != 0:
+           indexled = (ix*self.Nx)+(self.Ny-iy-1)
         self.send_LEDMatrix_single(indexled=indexled, intensity=np.array(state)*np.array(self.intensity), timeout=self.timeout)
 
         return self.ledpattern
     
-    def setAll(self, state, intensity=None):
+    def setAll(self, state, intensity=None, getReturn=False):
         # fast addressing
         # turns on all LEDs at a certain intensity
-        # state = np.sum(state)>0
+        state = np.sum(state)>0
         if intensity is not None:
             self.intensity = intensity
         intensity2display = np.array(self.intensity)*np.array(state)
-        self.send_LEDMatrix_full(intensity = intensity2display, timeout=self.timeout)
+        self.send_LEDMatrix_full(intensity = intensity2display, getReturn=getReturn)
         self.ledpattern = state*np.ones((self.NLeds, 3))
         return self.ledpattern
     
-    def setIntensity(self, intensity, getReturn=True):
+    def setIntensity(self, intensity, getReturn=False):
         self.intensity = intensity
         self.setPattern(getReturn=getReturn)
     
-    def setPattern(self, ledpattern=None, getReturn=True):
+    def setPattern(self, getReturn=True, ledpattern=None):
         # sends pattern with proper intensity
         if ledpattern is not None:
             self.ledpattern = ledpattern
         pattern2send = (self.ledpattern>=1)*self.intensity
         if np.sum(self.ledpattern, 0)[0]==self.ledpattern.shape[0]:
             # turn on all - faster! 
-            self.send_LEDMatrix_full(pattern2send[0,:], getReturn=getReturn, timeout=self.timeout)
+            self.send_LEDMatrix_full(pattern2send[0,:], getReturn=getReturn)
         else:
             # set individual pattern - slower
-            self.send_LEDMatrix_array(pattern2send, getReturn=getReturn, timeout=self.timeout)
+            self.send_LEDMatrix_array(pattern2send, getReturn=getReturn)
         return self.ledpattern
     
     def getPattern(self):
@@ -205,28 +208,8 @@ class LedMatrix(object):
         path = '/led'
         r = self._parent.post_json(path, payload)
         return r
-
-    def set_ledpin(self,ledArrPin=4, ledArrNum=None):
-        if ledArrNum is None:
-            ledArrNum = self.NLeds
-
-        path = "/ledarr_set"
-        payload = {
-            "task": path,
-            "ledArrPin": ledArrPin,
-            "ledArrNum": ledArrNum
-        }
-        r = self._parent.post_json(path, payload, getReturn=True)
-        return r
         
     def get_ledpin(self):
         path = "/ledarr_get"
         r = self._parent.get_json(path, getReturn=True, timeout=1)
         return r
-            
-    
-    def setLEDArrayConfig(self, ledArrPin=4, ledArrNum=None):
-        # make imswitch happy
-        # we assume the pattern is binary (e.g. 0 or 1)
-        self.ledpattern = np.ones((self.NLeds, 3)) * -1  # not set yet
-        return self.set_ledpin(ledArrNum=ledArrNum)

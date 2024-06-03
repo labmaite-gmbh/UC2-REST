@@ -1,409 +1,443 @@
-try:
-    import serial
-    import serial.tools.list_ports
-except:
-    print("No serial available - running on pyscript?")
-import time
+import serial
 import json
+import queue
+import threading
+import time
 
-T_SERIAL_WARMUP = 3 # the time to wait for the serial to warm up
+T_SERIAL_WARMUP = 1.5
+class Serial:
+    def __init__(self, port, baudrate=115200, timeout=5,
+                 identity="UC2_Feather", parent=None, DEBUG=False):
 
-class Serial(object):
-    
-    def __init__(self, port, baudrate, timeout=1, identity="UC2_Feather", parent=None, DEBUG=False):
+        self.ser = None
         self.serialport = port
         self.baudrate = baudrate
         self.timeout = timeout
         self._parent = parent
         self.identity = identity
         self.DEBUG = DEBUG
-
-        self.isSafetyBreak = False
-        
-        # default version (v1 or v2) for the API
-        self.versionFirmware = "V2.0"
-        
-        self.NumberRetryReconnect = 0
-        self.MaxNumberRetryReconnect = 0
-        
-        self.open() # creates self.serialdevice
-        
-        # switch between different api versions 
-        if self.versionFirmware == "V1.2":
-            self._parent.APIVersion = 1
-        elif self.versionFirmware == "V2.0":
-            self._parent.APIVersion = 2
-        
-        
-    def open(self):
-        '''Open the serial port'''
         self.is_connected = False
-        self.serialdevice = None
-        try:
-            # most simple case: We know all parameters
-            self.serialdevice = serial.Serial(port=self.serialport, baudrate=self.baudrate, timeout=1)
-            self.is_connected = True
-            time.sleep(T_SERIAL_WARMUP) # let it warm up
-            correctFirmware = self.checkFirmware()
-            if not correctFirmware:
-                raise Exception("Wrong firmware")
-                        
-            self._parent.logger.debug("We are connected: "+str(self.is_connected) + " on port: "+self.serialdevice.port)
-            return self.serialdevice
-        except Exception as e:
-            # try to find the PORT
-            self._parent.logger.error(e)
-            _available_ports = serial.tools.list_ports.comports(include_links=False)
+        self.write_timeout = 0.02
+        self.read_timeout = 0.02
 
-            portslist = ("COM", "/dev/tt", "/dev/a", "/dev/cu.SLA","/dev/cu.wchusb", "/dev/cu.usbserial") # TODO: Hardcoded :/
-            descriptionlist = ("CH340", "CP2102")
-            for iport in _available_ports:
-                # list of possible serial ports
-                self._parent.logger.debug(iport.device)
-                if iport.device.startswith(portslist) or iport.description.startswith(descriptionlist):
-                    try:
-                        self.serialdevice = serial.Serial(port=iport.device, baudrate=self.baudrate, timeout=1)
-                        self.serialdevice.write_timeout=1
-                        self.is_connected = True # attempting to initiliaze connection
-                        time.sleep(T_SERIAL_WARMUP) # let it warm up and wait until debugging messages may vanish
-                        correctFirmware = self.checkFirmware()
-                        if correctFirmware:
-                            self.serialport = iport.device
-                            self._parent.logger.debug("We are connected: "+str(self.is_connected) + " on port: "+self.serialdevice.port)
-                            self.NumberRetryReconnect=0
-                            return self.serialdevice
-                    except Exception as e:
-                        self._parent.logger.debug("Trying out port "+iport.device+" failed")
-                        self._parent.logger.error(e)
-                        self.is_connected = False
-        # last resort: we are not connected
-        self.serialport = "NotConnected"
-        self.serialdevice = SerialDeviceDummy()
-        self._parent.logger.debug("No USB device connected! Using DUMMY!")
-        return self.serialdevice                
+        self.cmdCallBackFct = None
 
-    def checkFirmware(self, timeout=1):
-        """Check if the firmware is correct"""
-        path = "/state_get"
-        _state = self.post_json(path, {"task":path}, timeout=timeout)
-        try:
-            self.versionFirmware = _state["identifier_id"]
-        except Exception as e:
-            self._parent.logger.error(e)
-            self.versionFirmware = "V2.0"
-            
-        if _state["identifier_name"] == self.identity: 
-            return True
-        
-        else: return False
+        # setup command queue
+        self.resetLastCommand = False
+        self.command_queue = queue.Queue()
+        self.responses = {}
+        self.commands = {}
+        self.lock = threading.Lock()
 
+        self.callBackList = []
 
-    def closeSerial(self):
-        self.serialdevice.close()
-        
-    def reconnect(self):
-        """Reconnect to serial device"""
-        if self.is_serial:
-            self.initSerial(self.serialport, self.baudrate)
-
-    def get_json(self, path):
-        """Perform an HTTP GET request and return the JSON response"""
-        message = {"task":path}
-        message = json.dumps(message)
-        self.serialdevice.flushInput()
-        self.serialdevice.flushOutput()
-        self._parent.logger.debug(message)
-        returnmessage = self.serialdevice.write(message.encode(encoding='UTF-8'))
-        return returnmessage
-    
-    def post_json(self, path, payload={}, getReturn=True, timeout=1):
-        """Make an HTTP POST request and return the JSON response"""
-        if "task" not in payload:
-            payload["task"] = path
-        
-        if "isblock" in payload:
-            is_blocking = payload["isblock"]
-        else:
-            is_blocking = True
-
-        # write message to the serial
-        self.writeSerial(payload)
-        
-        if getReturn:
-            # we read the return message
-            #self._parent.logger.debug(payload)
-            returnmessage = self.readSerial(is_blocking=is_blocking, timeout=timeout)
-            if returnmessage == 'deserializeJson() failed: NoMemory':
-                # TODO: We will loose values here - need to set xyz coordinates!!
-                self.serialdevice.close()
-                self._parent.state.espRestart()
-                self._parent.state.restart()
-                self.open()
-        else:
-            returnmessage = False
-        return returnmessage
-        
-    def writeSerial(self, payload):
-        """Write JSON document to serial device"""
-        try:
-            if self.serialport == "NotConnected" and self.NumberRetryReconnect<self.MaxNumberRetryReconnect:
-                # try to reconnect       
-                self._parent.logger.debug("Trying to reconnect to serial device: "+str(self.NumberRetryReconnect))       
-                self.NumberRetryReconnect += 1
-                self.open()
-                
-            self.serialdevice.flushInput()
-            self.serialdevice.flushOutput()
-        except Exception as e:
-            self._parent.logger.error(e)
-            try:
-                del self.serialdevice
-            except:
-                pass
-            self.is_connected=False
-            # attempt to reconnect?
-            try:
-                self.open()
-            except:
-                return -1
-
-        if type(payload)==dict:
-            payload = json.dumps(payload)
-        try:
-            if self.DEBUG: self._parent.logger.debug(payload)
-            self.serialdevice.write(payload.encode(encoding='UTF-8'))
-        except Exception as e:
-            self._parent.logger.error(e)
+        # initialize serial connection
+        self.thread = None
+        self.ser = self.openDevice(port, baudrate)
 
     def breakCurrentCommunication(self):
-        # this breaks the wait-for-return command in readserial
-        self.isSafetyBreak = True
-        self.serialdevice.flushInput()
-        self.serialdevice.flushOutput()
+        self.resetLastCommand = True
 
-
-    def readSerial(self, is_blocking=True, timeout = 1): # TODO: hardcoded timeout - not code
-        """Receive and decode return message"""
-        returnmessage = ''
-        _returnmessage = ''
-        rmessage = ''
-        _time0 = time.time()
-        if is_blocking:
-            while is_blocking and not self.isSafetyBreak:
-                try:
-                    rmessage =  self.serialdevice.readline().decode()
-                    if self.DEBUG: self._parent.logger.debug(rmessage)
-                    returnmessage += rmessage
-                    if rmessage.find("--")==0:
-                        break
-                except:
-                    pass
-                if (time.time()-_time0)>timeout:
-                    break
-            # casting to dict
+    def _freeSerialBuffer(self, ser, timeout=5):
+        t0 = time.time()
+        # free up any old data
+        while True:
             try:
-                # TODO: check if this is a valid JSON
-                _returnmessage = returnmessage.split("\n--")[0].split("\n++")[-1].replace("\r","").replace("\n", "").replace("'", '"')
-                if self.DEBUG: self._parent.logger.debug(returnmessage)
-                _returnmessage = json.loads(_returnmessage)
+                readLine = ser.readline().decode('utf-8').strip()
+                if self.DEBUG: self._parent.logger.debug(readLine)
+                if readLine == "":
+                    break
             except Exception as e:
-                if self.DEBUG: self._parent.logger.debug("Casting json string from serial to Python dict failed")
-            self.isSafetyBreak = False
-        return _returnmessage
-        
-class SerialManagerWrapper(object):
-    
-    def __init__(self, SerialManager, DEBUG = True, parent=None) -> None:
-        self._parent=parent
-        self._parent.logger.debug("SerialManagerWrapper init")
-        self.SerialManager = SerialManager
-        self.isSafetyBreak = False
-        self.DEBUG = DEBUG
-        
-    async def post_json(self, path, payload={}, getReturn=True, timeout=1):
-        if "task" not in payload:
-            payload["task"] = path
-        
-        if "isblock" in payload:
-            is_blocking = payload["isblock"]
-        else:
-            is_blocking = True
+                if self.DEBUG: self._parent.logger.debug(e)
 
-        # write message to the serial
-        await self.writeSerial(payload)
-        return ''
-        print(3)
-        if getReturn:
-            # we read the return message
-            #self._parent.logger.debug(payload)
-            returnmessage = self.readSerial(is_blocking=is_blocking, timeout=timeout)
-        else:
-            returnmessage = False
-        return returnmessage
-    
-    async def writeSerial(self, payload):
-        """Write JSON document to serial device"""
-        if type(payload)==dict:
-            payload = json.dumps(payload)
+                pass
+            if time.time()-t0 > timeout:
+                return
+
+    def openDevice(self, port=None, baud_rate=115200):
+        try: # try to close an eventually open serial connection
+            if str(type(self.ser)) != "<class 'uc2rest.mserial.MockSerial'>":
+                self.ser.close()
+        except: pass
+
         try:
-            if self.DEBUG: self._parent.logger.debug(payload)
-            await self.SerialManager.write(payload)
+            for i in range(2): # not good, but sometimes it  needs a second attempt
+                isUC2 = self.tryToConnect(port)
+                if isUC2:
+                    break
+            if not isUC2:
+                raise ValueError('Wrong Firmware.')
+            ser = self.serialdevice
+            self.is_connected = True
+            
         except Exception as e:
             self._parent.logger.error(e)
+            ser = self.findCorrectSerialDevice()
+            if ser is None:
+                ser = MockSerial(port, baud_rate, timeout=.1)
+                self.is_connected = False
+        ser.write_timeout = self.write_timeout
+        if not ser.isOpen():
+            ser.open()
+        # TODO: Need to be able to auto-connect
+        # need to let device warm up and flush out any old data
+        self._freeSerialBuffer(ser)
 
-    async def readSerial(self, is_blocking=True, timeout = 1): # TODO: hardcoded timeout - not code
-        """Receive and decode return message"""
-        returnmessage = ''
-        _returnmessage = ''
-        rmessage = ''
-        _time0 = time.time()
-        print("Reading serial")
-        if is_blocking:
-            while is_blocking and not self.isSafetyBreak:
+        # remove any remaining thread in case there was one open
+        try:
+            del self.thread
+        except:
+            pass
+        self.running = True
+        self.identifier_counter = 0 # Counter for generating unique identifiers
+        self.thread = threading.Thread(target=self._process_commands)
+        self.thread.start()
+        return ser
+
+    def findCorrectSerialDevice(self):
+        _available_ports = serial.tools.list_ports.comports(include_links=False)
+        ports_to_check = ["COM", "/dev/tt", "/dev/a", "/dev/cu.SLA", "/dev/cu.wchusb"]
+        descriptions_to_check = ["CH340", "CP2102"]
+
+        for port in _available_ports:
+            if any(port.device.startswith(allowed_port) for allowed_port in ports_to_check) or \
+               any(port.description.startswith(allowed_description) for allowed_description in descriptions_to_check):
+                if self.tryToConnect(port.device):
+                    self.is_connected = True
+                    return self.serialdevice
+
+        self.is_connected = False
+        self.serialport = "NotConnected"
+        self.serialdevice = None
+        self._parent.logger.debug("No USB device connected! Using DUMMY!")
+
+    def tryToConnect(self, port):
+        try:
+            self.serialdevice = serial.Serial(port=port, baudrate=self.baudrate, timeout=self.read_timeout, write_timeout=self.write_timeout)
+            time.sleep(T_SERIAL_WARMUP)
+            self._freeSerialBuffer(self.serialdevice)
+            if self.checkFirmware(self.serialdevice):
+                self.is_connected = True
+                self.NumberRetryReconnect = 0
+                return True
+            else:
+                False
+
+        except Exception as e:
+            self._parent.logger.debug(f"Trying out port {port} failed")
+            self._parent.logger.error(e)
+
+        return False
+
+    def checkFirmware(self, ser):
+        """Check if the firmware is correct
+        We do not do that inside the queue processor yet
+        """
+        path = "/state_get"
+        payload = {"task": path}
+
+        ser.write(json.dumps(payload).encode('utf-8'))
+        ser.write(b'\n')
+        # iterate a few times in case the debug mode on the ESP32 is turned on and it sends additional lines
+        for i in range(10):
+            # if we just want to send but not even wait for a response
+            mReadline = ser.readline()
+            if self.DEBUG: self._parent.logger.debug(mReadline)
+            if mReadline.decode('utf-8').strip() == "++":
+                self._freeSerialBuffer(ser)
+                return True
+        return False
+
+
+    def _generate_identifier(self):
+        self.identifier_counter += 1
+        return self.identifier_counter
+
+    def _process_commands(self):
+        buffer = ""
+        reading_json = False
+        currentIdentifier = None
+        nLineCountTimeout = 50 # maximum number of lines read before timeout
+        lineCounter = 0
+        lastTransmisionSuccess = True
+
+        qeueIdSuccess = {}
+        t0 = time.time()
+        while self.running:
+            
+            # Check if the last command went through successfully
+            if currentIdentifier is not None:
+                try: lastTransmisionSuccess = qeueIdSuccess[str(currentIdentifier)]
+                except: lastTransmisionSuccess = False 
+            if not self.command_queue.empty() and not reading_json and lastTransmisionSuccess:
+                currentIdentifier, command = self.command_queue.get()
+                
+                if self.DEBUG: self._parent.logger.debug("Sending: "+ str(command))
+                json_command = json.dumps(command)
+                if currentIdentifier == 5:
+                    self._parent.logger.debug("Sending: "+ str(command))
                 try:
-                    rmessage = await self.SerialManager.read().decode()
-                    if self.DEBUG: self._parent.logger.debug(rmessage)
-                    returnmessage += rmessage
-                    if rmessage.find("--")==0:
-                        break
+                    self.ser.write(json_command.encode('utf-8'))
+                except Exception as e:
+                    try:
+                        self.ser.write_timeout = 1
+                        self.ser.write(json_command.encode('utf-8'))
+                        self.ser.write_timeout=self.write_timeout
+                    except Exception as e:
+                        self._parent.logger.error("Writing failed in sreial")
+                        self._parent.logger.error(e)
+                try:self.ser.write(b'\n')
                 except:
-                    pass
-                if (time.time()-_time0)>timeout:
+                    self._parent.logger.error("Break the loop in serial") 
                     break
-            # casting to dict
+             
+            # device not ready yet
+            if self.ser is None:
+                self.is_connected = False
+                continue
+            else:
+                self.is_connected = True
+
+            # if we just want to send but not even wait for a response
             try:
-                # TODO: check if this is a valid JSON
-                _returnmessage = returnmessage.split("\n--")[0].split("\n++")[-1].replace("\r","").replace("\n", "").replace("'", '"')
-                if self.DEBUG: self._parent.logger.debug(returnmessage)
-                _returnmessage = json.loads(_returnmessage)
+                mReadline = self.ser.readline()
             except Exception as e:
-                if self.DEBUG: self._parent.logger.debug("Casting json string from serial to Python dict failed")
-            self.isSafetyBreak = False
-        return _returnmessage
-class SerialDummy(object):
+                self._parent.logger.error("Failed to read the line in serial")
+                self._parent.logger.error(e)
+                self.is_connected = False
+                break
+            try:
+                line = mReadline.decode('utf-8').strip()
+                if self.DEBUG and line!="": self._parent.logger.debug(line)
+            except:
+                line = ""
+            if line == "++":
+                reading_json = True
+                continue
+            elif line == "--" or lineCounter>nLineCountTimeout:
+                lineCounter = 0
+                reading_json = False
+                try:
+                    json_response = json.loads(buffer)
+                    # add success to the dictionary
+                    qeueIdSuccess[str(json_response["qid"])]=1
+                    if len(self.callBackList) > 0:
+                        for callback in self.callBackList:
+                            # check if json has key
+                            try: 
+                                if callback["pattern"] in json_response:
+                                    callback["callbackfct"](json_response)    
+                            except Exception as e:
+                                self._parent.logger.debug(e)
+                            
+                            
+                except: 
+                    self._parent.logger.debug("Failed to load the json from serial")
+                    json_response = {}      
+                
+                with self.lock:
+                    try: currentIdentifier = json_response["qid"]
+                    except: pass
+                    try:
+                        self.responses[currentIdentifier].append(json_response.copy())
+                    except:
+                        self.responses[currentIdentifier] = list()
+                        self.responses[currentIdentifier].append(json_response.copy())
+                buffer = ""     # reset buffer
+
+            if reading_json:
+                buffer += line
+                lineCounter +=1
+        self.running = False
+
+    def get_json(self, path):
+        message = {"task":path}
+        message = json.dumps(message)
+        return self.sendMessage(message, nResponses=0)
+
+    def post_json(self, path, payload, getReturn=True, nResponses=1):
+        """Make an HTTP POST request and return the JSON response"""
+        if payload is None:
+            payload = {}
+        if "task" not in payload:
+            payload["task"] = path
+
+        # write message to the serial
+        if not getReturn:
+            nResponses = -1
+        if self.cmdCallBackFct is not None:
+            self.cmdCallBackFct(payload)
+            return "OK"
+        else:
+            writeResult = self.sendMessage(command=payload, nResponses=nResponses)
+            return writeResult
+
+    def writeSerial(self, payload):
+        return self.sendMessage(payload, nResponses=-1)
+
+    def breakCurrentCommunication(self):
+        pass # not needed anymore
+
+    def readSerial(self, qid=0, timeout=1):
+        t0 = time.time()
+        while time.time()-t0<timeout:
+            try:
+                return self.responses[qid]
+            except:
+                pass
+        return {"timeout": 1}
+
+    def register_callback(self, callback, pattern):
+        '''
+        we need to add a callback function to a list of callbacks that will be read during the serial communication
+        loop
+        ''' 
+        self.callBackList.append({"callbackfct":callback, "pattern":pattern})
         
-    def __init__(self, port, baudrate, timeout=1, parent=None):
+    def sendMessage(self, command, nResponses=1, timeout = 20):
+        '''
+        Sends a command to the device and optionally waits for a response.
+        If nResponses is 0, then the command is sent but no response is expected.
+        If nResponses is 1, then the command is sent and the response is returned.
+        If nResponses is >1, then the command is sent and a list of responses is returned.
+        '''
+        t0 = time.time()
+        if type(command) == str:
+            command = json.loads(command)
+        identifier = self._generate_identifier()
+        command["qid"] = identifier
+        self.command_queue.put((identifier, command))
+        self.commands[identifier]=command
+        if nResponses <= 0 or not self.is_connected or not type(self.ser.BAUDRATES) is tuple:
+            return identifier
+        while self.running:
+            time.sleep(0.002)
+            if self.resetLastCommand or time.time()-t0>timeout or not self.is_connected:
+                self.resetLastCommand = False
+                return "communication interrupted"
+            with self.lock:
+                if identifier in self.responses:
+                    if len(self.responses[identifier])==nResponses:
+                        return self.responses[identifier][-1]
+                if -identifier in self.responses:
+                    self._parent.logger.debug("You have sent the wrong command!")
+                    return "Wrong Command"
+
+    def interruptCurrentSerialCommunication(self):
+        self.resetLastCommand = True
+
+    def stop(self):
+        self.running = False
+        self.thread.join()
+        self.ser.close()
+
+    def closeSerial(self):
+        self.stop()
+
+    def reconnect(self):
+        self.running=0
+        try:
+            self.ser.close()
+        except:
+            pass
+        self.openDevice(port = self.serialport, baud_rate = self.baudrate)
+
+    def toggleCommandOutput(self, cmdCallBackFct=None):
+        # if true, all commands will be output to a callback function and stored for later use
+        self.cmdCallBackFct = cmdCallBackFct
+
+if __name__ == "__main__":
+    # Usage example
+    monitor = Serial('/dev/cu.SLAB_USBtoUART', baudsrate=115200)  # Change to your port
+
+    command_to_send = {
+            "task": "/state_get"
+    }
+
+    command_to_send = {"task":"/motor_act","motor":{"steppers": [{ "stepperid": 3, "position": -1000, "speed": 15000, "isabs": 0, "isaccel":0}]}}
+
+    t0 = time.time()
+    response = monitor.sendMessage(command_to_send, nResponses=2)
+    print("Response:", response)
+    print("time:", time.time()-t0)
+
+    t0 = time.time()
+    response = monitor.sendMessage(command_to_send, nResponses=0)
+    print("Response:", response)
+    print("time:", time.time()-t0)
+
+
+    #response = monitor.waitForResponse(command_id)
+
+    if response:
+        print("Response:", response)
+
+    monitor.stop()
+
+
+class SerialManagerWrapper:
+
+    def __init__(self) -> None:
+        pass
+
+import random
+from threading import Thread
+class MockSerial:
+    def __init__(self, port, baudrate, timeout=1):
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
-        self._parent = parent
-        
-        self.serialdevice = self.open()
-        
+        self.is_open = False
+        self.data_buffer = []
+        self.thread = Thread(target=self._simulate_data)
+        self.thread.daemon = True
+        self.thread.start()
+        self.is_open = True
+        self.manufacturer = "UC2Mock"
+        self.BAUDRATES = -1
+
+    def isOpen(self):
+        return self.is_open 
+    
     def open(self):
-        '''Open the serial port'''
-        return SerialDeviceDummy()                
+        self.is_open = True
 
-    def checkFirmware(self):
-        """Check if the firmware is correct"""
-        return True
-        
     def close(self):
-        self.closeSerial()
-        
-    def closeSerial(self):
-        self.serialdevice.close()
-        
-    def reconnect(self):
-        """Reconnect to serial device"""
-        if self.is_serial:
-            self.initSerial(self.serialport, self.baudrate)
+        self.is_open = False
 
-    def get_json(self, path):
-        """Perform an HTTP GET request and return the JSON response"""
-        message = {"task":path}
-        message = json.dumps(message)
-        self.serialdevice.flushInput()
-        self.serialdevice.flushOutput()
-        returnmessage = self.serialdevice.write(message.encode(encoding='UTF-8'))
-        return returnmessage
+    def readline(self, timeout=1):
+        if not self.is_open:
+            raise Exception("Device not connected")
+        if len(self.data_buffer) == 0:
+            return b''
+        data = self.data_buffer
+        self.data_buffer = self.data_buffer
+        time.sleep(.05)
+        return bytes(data)
 
-    def post_json(self, path, payload={}, getReturn=True, timeout=1):
-        """Make an HTTP POST request and return the JSON response"""
-        try:
-            payload["task"]
-        except:
-            payload["task"] = path
-        try:
-            is_blocking = payload['isblock']
-        except:
-            is_blocking = True
-        self.writeSerial(payload)
-        if getReturn:
-            # we read the return message
-            #self._parent.logger.debug(payload)
-            returnmessage = self.readSerial(is_blocking=False, timeout=timeout)
-        else:
-            returnmessage = None
-        return returnmessage
-        
-    def writeSerial(self, payload):
-        """Write JSON document to serial device"""
-        try:
-            self.serialdevice.flushInput()
-            self.serialdevice.flushOutput()
-        except Exception as e:
-            self._parent.logger.error(e)
-            try:
-                del self.serialdevice
-            except:
-                pass
-            self.is_connected=False
-            # attempt to reconnect?
-            try:
-                self.open()
-            except:
-                return -1
+    def read(self, num_bytes):
+        if not self.is_open:
+            raise Exception("Device not connected")
+        if len(self.data_buffer) == 0:
+            return b''
+        data = self.data_buffer[:num_bytes]
+        self.data_buffer = self.data_buffer[num_bytes:]
+        return bytes(data)
 
-        if type(payload)==dict:
-            payload = json.dumps(payload)
-        try:
-            self.serialdevice.write(payload.encode(encoding='UTF-8'))
-        except Exception as e:
-            self._parent.logger.error(e)
+    def write(self, data):
+        if not self.is_open:
+            raise Exception("Device not connected")
+        pass  # Do nothing, as it's a mock
 
+    def _simulate_data(self):
+        while self.is_open:
+            if random.random() < 0.2:  # Simulate occasional data availability
+                self.data_buffer.extend([random.randint(0, 255) for _ in range(10)])
+            time.sleep(0.1)
 
-    def readSerial(self, is_blocking=True, timeout = 15): # TODO: hardcoded timeout - not code
-        """Receive and decode return message"""
-        returnmessage = ''
-        rmessage = ''
-        _time0 = time.time()
-        if is_blocking:
-            while is_blocking:
-                try:
-                    rmessage =  self.serialdevice.readline().decode()
-                    #self._parent.logger.debug(rmessage)
-                    returnmessage += rmessage
-                    if rmessage.find("--")==0:
-                        break
-                except:
-                    pass
-                if (time.time()-_time0)>timeout:
-                    break
-            # casting to dict
-            try:
-                returnmessage = json.loads(returnmessage.split("--")[0].split("++")[-1])
-            except:
-                self._parent.logger.debug("Casting json string from serial to Python dict failed")
-                returnmessage = ""
-        return returnmessage
+    def __enter__(self):
+        self.open()
+        return self
 
-        
-class SerialDeviceDummy(object):
-        def __init__(self) -> None:
-            pass
-        
-        def close(self):
-            pass
-        
-        def flushInput(self):
-            pass
-        
-        def flushOutput(self):
-            pass
-        
-        def write(self, payload):
-            pass
-        
-        def readline(self):
-            return b'{"task":"dummy"}--'
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()

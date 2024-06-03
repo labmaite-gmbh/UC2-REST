@@ -10,10 +10,7 @@ class Home(object):
         self.speed = 15000
         self.timeout = 40000
         self.endstoppolarity = 1
-
-    def setHomeAxisOrder(self, order=[0,1,2,3]):
-        self.homeAxisOrder = order
-
+        
     def home_x(self, speed = None, direction = None, endposrelease = None, endstoppolarity=None, timeout=None, isBlocking=False):
         # axis = 1 corresponds to 'X'
         axis = 1
@@ -34,10 +31,10 @@ class Home(object):
                   direction = direction, 
                   endposrelease=endposrelease, 
                   endstoppolarity=endstoppolarity,
-                  isBlocking=isBlocking)
+                  isBlocking=isBlocking)    
     
     def home_z(self, speed = None, direction = None, endposrelease = None, endstoppolarity=None, timeout=None, isBlocking=False):
-        # axis = 3 corresponds to 'Z'
+        # axisa = 3 corresponds to 'Z'
         axis = 3
         self.home(axis=axis, 
                   timeout=timeout, 
@@ -139,10 +136,10 @@ class Home(object):
                 "steppers": [
                 {
                  "stepperid": axis,
-                 "timeout":timeout*1000,
+                 "timeout":timeout,
                  "speed":speed,
                  "direction":direction,
-                 "endposrelease":endposrelease,
+                 "endposrelease":endposrelease, 
                  "endstoppolarity":endstoppolarity
                  }]
             }}
@@ -151,24 +148,7 @@ class Home(object):
         nResponses = 2 # one for command received, one for home reached
         
         # if we get a return, we will receive the latest position feedback from the driver  by means of the axis that moves the longest
-        r = self._parent.post_json(path, payload, getReturn=isBlocking, timeout=timeout)
-
-        # wait until job has been done
-        time0=time.time()
-        if isBlocking and self._parent.serial.is_connected:
-            while True:
-                time.sleep(0.05) # don'T overwhelm the CPU
-                # see if already done
-                try:
-                    rMessage = self._parent.serial.serialdevice.readline().decode() # TODO: Make sure it's compatible with all motors running at the same time
-                except Exception as e:
-                    self._parent.logger.error(e)
-                    rMessage = ""
-                # check if message contains a motor that is done already
-                if rMessage.find('isDone') >-1:
-                    break
-                if time.time()-time0>timeout:
-                    break
+        r = self._parent.post_json(path, payload, getReturn=isBlocking, timeout=timeout, nResponses=nResponses)
 
         return r
 
