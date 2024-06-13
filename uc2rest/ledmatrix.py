@@ -1,7 +1,7 @@
 import numpy as np
 import json
 import time 
-gTimeout = 1
+gTimeout = 2000
 class LedMatrix(object):
     def __init__(self, parent, Nx=5, Ny=5):
         #TOOD: This is for the LED matrix only!
@@ -17,7 +17,7 @@ class LedMatrix(object):
         
         # this is a istance of the _parent32Client class
         self._parent = parent
-        self.timeout = 1
+        self.timeout = 2000
         self.intensity = (255,255,255)
         
         self.ledArrayModes = {
