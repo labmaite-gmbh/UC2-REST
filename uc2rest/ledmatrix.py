@@ -232,13 +232,15 @@ class LedMatrix(object):
         # sends pattern with proper intensity
         if ledpattern is not None:
             self.ledpattern = ledpattern
-        pattern2send = (self.ledpattern>=1)*self.intensity
-        if np.sum(self.ledpattern, 0)[0]==self.ledpattern.shape[0]:
-            # turn on all - faster! 
-            self.send_LEDMatrix_full(pattern2send[0,:], getReturn=getReturn)
+
+        if np.sum(self.ledpattern, 0).any():
+            if np.count_nonzero(np.sum(self.ledpattern, 1)) > 16: # len(led_pattern)/2
+                print(f"Better split command")
+            if len(self.ledpattern) == np.count_nonzero(np.sum(self.ledpattern, 1)):
+                return self.setAll(True, intensity = (self.ledpattern[0]), getReturn=True)
         else:
-            # set individual pattern - slower
-            self.send_LEDMatrix_array(pattern2send, getReturn=getReturn)
+            return self.setAll(False, getReturn=True)
+        self.send_LEDMatrix_array(self.ledpattern, getReturn=getReturn)
         return self.ledpattern
     
     def getPattern(self):
