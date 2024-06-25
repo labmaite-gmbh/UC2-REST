@@ -1,7 +1,7 @@
 import numpy as np
 import json
 import time 
-gTimeout = 1
+gTimeout = 0.5
 class LedMatrix(object):
     def __init__(self, parent, NLeds=64):
         #TOOD: This is for the LED matrix only!
@@ -36,7 +36,7 @@ class LedMatrix(object):
     LED ARRAY
     ##############################################################################################################################
     '''
-    def send_LEDMatrix_array(self, led_pattern, getReturn = True, timeout=gTimeout):
+    def send_LEDMatrix_array_(self, led_pattern, getReturn = True, timeout=gTimeout):
         '''
         Send an LED array pattern e.g. an RGB Matrix: led_pattern=np.zeros((3,8,8))
         '''
@@ -71,6 +71,51 @@ class LedMatrix(object):
         if not getReturn or timeout==0:
             r = {"success": 1}
         self.currentLedArrayMode = "array"            
+        return r
+
+    '''
+       ##############################################################################################################################
+       LED ARRAY - Command size limited version
+       ##############################################################################################################################
+       '''
+    def send_LEDMatrix_array(self, led_pattern, getReturn=True, timeout=gTimeout):
+        '''
+        Send an LED array pattern e.g. an RGB Matrix: led_pattern=np.zeros((3,8,8))
+        '''
+        path = '/ledarr_act'
+
+        # convert pattern strip to list of RGB values
+        if not type(led_pattern) is list:
+            # if we have a 2d pattern => flatten
+            if len(led_pattern.shape) == 3:
+                led_pattern = np.reshape(led_pattern, (np.prod(led_pattern.shape[0:2]), led_pattern.shape[2]))
+
+            pattern_list = []
+            for i, led in enumerate(led_pattern):
+                if led.any():
+                    pattern_list.append({
+                        "id": i,
+                        "r": int(led[0]),
+                        "g": int(led[1]),
+                        "b": int(led[2])
+                    })
+                else:
+                    pass
+        else:
+            pattern_list = led_pattern
+
+        payload = {
+            "task": path,
+            "led": {
+                "LEDArrMode": self.ledArrayModes["array"],
+                "led_array": pattern_list
+            }
+        }
+        # self._parent.logger.debug("Setting LED Pattern (array) ")
+        r = self._parent.post_json(path, payload, getReturn=getReturn, timeout=timeout)
+        if not getReturn or timeout == 0:
+            r = {"success": 1}
+        self.currentLedArrayMode = "array"
         return r
 
     def send_LEDMatrix_full(self, intensity = (255,255,255), getReturn=False, timeout=gTimeout):
