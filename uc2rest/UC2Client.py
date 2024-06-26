@@ -108,8 +108,7 @@ class UC2Client(object):
             from .digitalout import DigitalOut
 
 
-        #FIXME
-        #self.set_state(debug=False)
+        self.setDebugging(debug=DEBUG)
 
         # initialize state
         self.state = State(self)
@@ -194,3 +193,6 @@ class UC2Client(object):
     def setDebugging(self, debug=False):
         self.logger.debug(f"Setting debugging to {debug}")
         self.serial.DEBUG = debug
+
+    def close(self):
+        self.serial.closeSerial()
