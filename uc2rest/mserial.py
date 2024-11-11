@@ -5,7 +5,7 @@ import queue
 import threading
 import time
 
-T_SERIAL_WARMUP = 1#2.5
+T_SERIAL_WARMUP = 3#2.5
 class Serial:
     def __init__(self, port, baudrate=115200, timeout=5,
                  identity="UC2_Feather", parent=None, DEBUG=False):
@@ -431,7 +431,7 @@ class Serial:
 
 if __name__ == "__main__":
     # Usage example
-    monitor = Serial('/dev/cu.SLAB_USBtoUART', baudsrate=115200)  # Change to your port
+    monitor = Serial('/dev/cu.SLAB_USBtoUART', baudrate=115200)  # Change to your port
 
     command_to_send = {
             "task": "/state_get"
