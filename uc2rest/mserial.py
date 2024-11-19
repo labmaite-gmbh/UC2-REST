@@ -379,7 +379,7 @@ class Serial:
         t0 = time.time()
         timeReturnReceived = 0.3
         while self.running:
-            time.sleep(0.002)
+            time.sleep(0.005)
             if self.resetLastCommand or time.time()-t0>timeout or not self.is_connected:
                 self.resetLastCommand = False
                 return "communication interrupted by timeout or reset: "+str(identifier) + " and code:"+str(self.commands[identifier])
