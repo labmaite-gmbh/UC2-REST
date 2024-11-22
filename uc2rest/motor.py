@@ -3,7 +3,7 @@ import time
 import json
 
 
-gTIMEOUT = 200 # seconds to wait for a response from the ESP32
+gTIMEOUT = 250 # seconds to wait for a response from the ESP32
 class Motor(object):
 
     # indicate if there is any motion happening
