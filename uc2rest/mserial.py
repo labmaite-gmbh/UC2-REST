@@ -255,7 +255,7 @@ class Serial:
         message = json.dumps(message)
         return self.sendMessage(message, nResponses=0)
 
-    def post_json(self, path, payload, getReturn=True, nResponses=1):
+    def post_json(self, path, payload, getReturn=True, nResponses=1, timeout=20):
         """Make an HTTP POST request and return the JSON response"""
         if payload is None:
             payload = {}
@@ -269,7 +269,7 @@ class Serial:
             self.cmdCallBackFct(payload)
             return "OK"
         else:
-            writeResult = self.sendMessage(command=payload, nResponses=nResponses)
+            writeResult = self.sendMessage(command=payload, nResponses=nResponses, timeout=timeout)
             return writeResult
 
     def writeSerial(self, payload):
@@ -312,7 +312,20 @@ class Serial:
             return identifier
         while self.running:
             time.sleep(0.002)
-            if self.resetLastCommand or time.time()-t0>timeout or not self.is_connected:
+            elapsed = time.time() - t0
+            if self.resetLastCommand or elapsed > timeout or not self.is_connected:
+                if elapsed > timeout and not self.resetLastCommand and self.is_connected:
+                    # No matching response arrived in time: the caller gives up here, but the
+                    # command stays in commands/command_queue and _process_commands may still be
+                    # stuck waiting on it, so every command behind it in the queue pays out this
+                    # same timeout next. Logging qid/task/elapsed is what makes that visible --
+                    # previously this failure mode was silent and only reconstructable after the
+                    # fact from gaps between unrelated log lines.
+                    task = command.get("task", "?") if isinstance(command, dict) else "?"
+                    self._parent.logger.error(
+                        f"Serial command timed out after {elapsed:.1f}s waiting for a response "
+                        f"(qid={identifier}, task={task}, wanted {nResponses} response(s)); "
+                        f"giving up.")
                 self.resetLastCommand = False
                 return "communication interrupted"
             with self.lock:

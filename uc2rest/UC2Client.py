@@ -169,7 +169,11 @@ class UC2Client(object):
         elif self.is_serial or self.isPyScript:
             if timeout <=0:
                 getReturn = False
-            return self.serial.post_json(path, payload, getReturn=getReturn, nResponses=nResponses)
+            # Was dropped here before: the serial Serial.post_json() has always defaulted to a
+            # hard-coded 20s regardless of what a caller like motor.isBusy(timeout=1) asked for,
+            # so a busy-poll loop calling it every 1ms could still block up to 20s per call the
+            # moment a response went missing.
+            return self.serial.post_json(path, payload, getReturn=getReturn, nResponses=nResponses, timeout=timeout)
         else:
             self.logger.error("No ESP32 device is connected - check IP or Serial port!")
             return None
@@ -181,10 +185,9 @@ class UC2Client(object):
             r = requests.get(url, headers=self.headers, timeout=timeout)
             return r.json()
         elif self.is_serial or self.isPyScript:
-            # timeout is not used anymore
             if timeout <=0:
                 getReturn = False
-            return self.serial.post_json(path, payload=None, getReturn=getReturn, nResponses=1)
+            return self.serial.post_json(path, payload=None, getReturn=getReturn, nResponses=1, timeout=timeout)
             #return self.serial.read_json()
         else:
             self.logger.error("No ESP32 device is connected - check IP or Serial port!")
