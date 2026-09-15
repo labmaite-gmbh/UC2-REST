@@ -256,7 +256,14 @@ class Serial:
         return self.sendMessage(message, nResponses=0)
 
     def post_json(self, path, payload, getReturn=True, nResponses=1, timeout=20):
-        """Make an HTTP POST request and return the JSON response"""
+        """Make an HTTP POST request and return the JSON response.
+
+        Retries once on "communication interrupted": a fresh call gets a new
+        qid, so it costs nothing extra once a transient desync (see
+        esp32_conn.py's get_object() comment on the qid-framed protocol) has
+        cleared up, and it's the cheapest thing to try before a caller
+        considers a full reconnect().
+        """
         if payload is None:
             payload = {}
         if "task" not in payload:
@@ -268,9 +275,13 @@ class Serial:
         if self.cmdCallBackFct is not None:
             self.cmdCallBackFct(payload)
             return "OK"
-        else:
+
+        writeResult = self.sendMessage(command=payload, nResponses=nResponses, timeout=timeout)
+        if writeResult == "communication interrupted" and nResponses > 0:
+            self._parent.logger.warning(
+                f"Serial command '{payload.get('task', path)}' was interrupted; retrying once.")
             writeResult = self.sendMessage(command=payload, nResponses=nResponses, timeout=timeout)
-            return writeResult
+        return writeResult
 
     def writeSerial(self, payload):
         return self.sendMessage(payload, nResponses=-1)
@@ -348,12 +359,25 @@ class Serial:
         self.stop()
 
     def reconnect(self):
-        self.running=0
+        """Stop the current reader thread, then close and reopen the port.
+
+        openDevice() always starts a fresh reader thread on the new
+        connection, so the old one must be fully stopped first -- otherwise
+        two threads can briefly read the same (or an about-to-be-replaced)
+        serial object at once, which is exactly the kind of interleaving
+        that desyncs the qid-framed protocol (see get_object()'s comment in
+        esp32_conn.py). A bounded join keeps this from hanging forever if
+        the old thread is itself stuck; reconnecting anyway at that point is
+        the better failure mode than reconnect() never returning.
+        """
+        self.running = False
+        if self.thread is not None:
+            self.thread.join(timeout=1.0)
         try:
             self.ser.close()
         except:
             pass
-        self.openDevice(port = self.serialport, baud_rate = self.baudrate)
+        self.openDevice(port=self.serialport, baud_rate=self.baudrate)
 
     def toggleCommandOutput(self, cmdCallBackFct=None):
         # if true, all commands will be output to a callback function and stored for later use
