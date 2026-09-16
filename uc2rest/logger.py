@@ -5,5 +5,8 @@ class Logger(object):
     def error(self,message):
         print(message)
 
+    def warning(self, message):
+        print(message)
+
     def debug(self, message):
         print(message)
