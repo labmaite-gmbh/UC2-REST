@@ -2,6 +2,8 @@ import numpy as np
 import time
 import json
 
+from .mserial import CommunicationError
+
 
 gTIMEOUT = 100 # seconds to wait for a response from the ESP32
 class Motor(object):
@@ -394,16 +396,18 @@ class Motor(object):
             "isbusy": 1
         }
         r = self._parent.post_json(path, payload, timeout=timeout)
+        # A broken/timed-out exchange (post_json() returns the sentinel
+        # string "communication interrupted") must not be reported as "not
+        # busy" -- that made a dead connection indistinguishable from a
+        # completed move to wait_for_move_complete()'s poll loop. Raise so
+        # the caller can tell "don't know" from "confirmed not busy".
         try:
             isbusy = 0
             for iMotor in range(self.nMotors):
                 isbusy += r["motor"]["steppers"][iMotor]["isbusy"]
-            if isbusy:
-                return True
-            else :
-                return False
+            return bool(isbusy)
         except Exception as e:
-            return False
+            raise CommunicationError(f"isBusy(): no valid response from ESP32 ({r!r}): {e}") from e
 
 
 

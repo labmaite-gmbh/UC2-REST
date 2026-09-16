@@ -4,6 +4,16 @@ import queue
 import threading
 import time
 
+
+class CommunicationError(Exception):
+    """A serial exchange with the ESP32 could not be completed (the
+    qid-framed response was lost, timed out, or came back malformed).
+    Distinct from a plain bug so callers (see esp32_conn.py's
+    call_with_retry) can retry specifically on this and not on a real
+    programming error."""
+    pass
+
+
 T_SERIAL_WARMUP = 1.5
 class Serial:
     def __init__(self, port, baudrate=115200, timeout=5,
