@@ -47,3 +47,31 @@ def test_is_busy_still_returns_false_on_a_real_not_busy_response():
     response = {"motor": {"steppers": [{"isbusy": 0}, {"isbusy": 0}, {"isbusy": 0}, {"isbusy": 0}]}}
     motor = Motor(_StubParent(response))
     assert motor.isBusy(0) is False
+
+
+def test_is_busy_reads_the_real_api_v2_firmwares_isRunning_field():
+    """2026-09-16 live-hardware regression: real API v2 firmware
+    (UC2Client's own "Using API version 2" debug line) returns each
+    stepper's busy flag as "isRunning", not "isbusy" -- confirmed directly
+    from a live /motor_get response captured off real hardware. The old
+    hardcoded "isbusy" lookup raised a KeyError on every single call
+    against this firmware, which the fail-open bug this file's other tests
+    cover used to silently turn into "not busy" -- and which, once that bug
+    was fixed to raise CommunicationError instead, made isBusy() raise on
+    literally every call, permanently blocking every stage move."""
+    response = {"motor": {"steppers": [
+        {"stepperid": 0, "position": 8202, "isRunning": 1, "isStop": 0},
+        {"stepperid": 1, "position": 86466, "isRunning": 0, "isStop": 0},
+        {"stepperid": 2, "position": 224160, "isRunning": 0, "isStop": 0},
+        {"stepperid": 3, "position": 8204, "isRunning": 0, "isStop": 0},
+    ]}, "qid": 28}
+    motor = Motor(_StubParent(response))
+    assert motor.isBusy(0) is True
+
+
+def test_is_busy_returns_false_when_isRunning_reports_every_stepper_idle():
+    response = {"motor": {"steppers": [
+        {"stepperid": i, "position": 0, "isRunning": 0, "isStop": 0} for i in range(4)
+    ]}}
+    motor = Motor(_StubParent(response))
+    assert motor.isBusy(0) is False

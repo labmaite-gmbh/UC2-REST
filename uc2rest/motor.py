@@ -404,7 +404,12 @@ class Motor(object):
         try:
             isbusy = 0
             for iMotor in range(self.nMotors):
-                isbusy += r["motor"]["steppers"][iMotor]["isbusy"]
+                stepper = r["motor"]["steppers"][iMotor]
+                # API v2 firmware reports this as "isRunning"; "isbusy" is
+                # kept as a fallback for any firmware/response that still
+                # uses the older key. A stepper with neither key present
+                # falls through to the outer except below.
+                isbusy += stepper["isRunning"] if "isRunning" in stepper else stepper["isbusy"]
             return bool(isbusy)
         except Exception as e:
             raise CommunicationError(f"isBusy(): no valid response from ESP32 ({r!r}): {e}") from e
