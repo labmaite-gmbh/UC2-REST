@@ -16,6 +16,17 @@ class CommunicationError(Exception):
 
 T_SERIAL_WARMUP = 1.5
 class Serial:
+    # Reopening the same port immediately after closing it (exactly what
+    # reconnect() does) can hit a transient failure while the OS finishes
+    # releasing the handle -- a 2026-09-16 live-hardware incident hit this
+    # on Windows (PermissionError: Access is denied) and, with only the
+    # original 2 attempts and no delay, fell straight through to
+    # findCorrectSerialDevice()'s port-scan and then a silent MockSerial
+    # "dummy" fallback, with no exception raised anywhere. A short backoff
+    # between attempts lets the transient case clear before giving up.
+    _REOPEN_ATTEMPTS = 5
+    _REOPEN_RETRY_DELAY_S = 0.3
+
     def __init__(self, port, baudrate=115200, timeout=5,
                  identity="UC2_Feather", parent=None, DEBUG=False):
 
@@ -71,10 +82,12 @@ class Serial:
         except: pass
 
         try:
-            for i in range(2): # not good, but sometimes it  needs a second attempt
+            isUC2 = False
+            for i in range(self._REOPEN_ATTEMPTS):
                 isUC2 = self.tryToConnect(port)
                 if isUC2:
                     break
+                time.sleep(self._REOPEN_RETRY_DELAY_S)
             if not isUC2:
                 raise ValueError('Wrong Firmware.')
             ser = self.serialdevice
@@ -92,6 +105,14 @@ class Serial:
         # TODO: Need to be able to auto-connect
         # need to let device warm up and flush out any old data
         self._freeSerialBuffer(ser)
+
+        # _process_commands() (started below) reads self.ser, not this
+        # function's local `ser` -- it must be assigned before the thread
+        # starts, not left for the caller to assign from this function's
+        # return value afterward. Otherwise the new thread's very first
+        # loop iteration can see a stale or None self.ser and immediately
+        # flip is_connected back to False, racing whoever just reconnected.
+        self.ser = ser
 
         # remove any remaining thread in case there was one open
         try:
@@ -387,7 +408,21 @@ class Serial:
             self.ser.close()
         except:
             pass
-        self.openDevice(port=self.serialport, baud_rate=self.baudrate)
+        self.ser = self.openDevice(port=self.serialport, baud_rate=self.baudrate)
+        # is_connected is not a reliable signal here: _process_commands()'s
+        # own thread (just started by openDevice()) flips it back to True
+        # for any non-None self.ser, dummy included, as soon as it runs its
+        # first loop iteration -- racing this check. The object's type is
+        # unambiguous instead (same idiom openDevice() itself uses above).
+        if str(type(self.ser)) == "<class 'uc2rest.mserial.MockSerial'>":
+            # openDevice() exhausted its own reopen retries and fell back to
+            # a disconnected/dummy serial backend -- that must not look like
+            # a successful reconnect to a caller (e.g. esp32_conn.py's
+            # call_with_retry), which would otherwise happily retry against
+            # a connection that can never respond.
+            raise CommunicationError(
+                f"reconnect(): could not reopen {self.serialport!r} -- "
+                f"fell back to a disconnected/dummy serial backend")
 
     def toggleCommandOutput(self, cmdCallBackFct=None):
         # if true, all commands will be output to a callback function and stored for later use
