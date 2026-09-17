@@ -215,7 +215,7 @@ class Serial:
                         self.ser.write(json_command.encode('utf-8'))
                         self.ser.write_timeout=self.write_timeout
                     except Exception as e:
-                        self._parent.logger.error("Writing failed in sreial")
+                        self._parent.logger.error("Writing failed in serial")
                         self._parent.logger.error(e)
                 try:self.ser.write(b'\n')
                 except:
@@ -250,25 +250,43 @@ class Serial:
                 reading_json = False
                 try:
                     json_response = json.loads(buffer)
-                    # add success to the dictionary
-                    qeueIdSuccess[str(json_response["qid"])]=1
                     if len(self.callBackList) > 0:
                         for callback in self.callBackList:
                             # check if json has key
-                            try: 
+                            try:
                                 if callback["pattern"] in json_response:
-                                    callback["callbackfct"](json_response)    
+                                    callback["callbackfct"](json_response)
                             except Exception as e:
                                 self._parent.logger.debug(e)
-                            
-                            
-                except: 
+
+
+                except:
                     self._parent.logger.debug("Failed to load the json from serial")
-                    json_response = {}      
-                
+                    json_response = {}
+
                 with self.lock:
-                    try: currentIdentifier = json_response["qid"]
-                    except: pass
+                    # The command this exchange answers is whichever qid the
+                    # response carries, or -- when it didn't parse, or parsed
+                    # without a qid -- currentIdentifier, i.e. the command that
+                    # was actually outstanding (set when it was dequeued and
+                    # sent, above). Either way it must be marked done in
+                    # qeueIdSuccess: that is what lets the dequeue gate at the
+                    # top of this loop move on to the next queued command.
+                    # Previously this was only ever set from inside the JSON
+                    # parse's own try block, so a single garbled/unparseable
+                    # response left it unset forever for that qid -- and
+                    # since nothing else ever sets it, every command queued
+                    # after that one waited on a gate that could never
+                    # reopen, for the rest of the connection's life (only a
+                    # full reconnect(), with fresh locals, cleared it). Traced
+                    # from a 2026-09-17 live run where this silently stalled
+                    # every stage move for the last ~18 minutes of an
+                    # experiment after exactly one "Failed to load the json
+                    # from serial".
+                    qid = json_response.get("qid", currentIdentifier)
+                    if qid is not None:
+                        qeueIdSuccess[str(qid)] = 1
+                        currentIdentifier = qid
                     try:
                         self.responses[currentIdentifier].append(json_response.copy())
                     except:

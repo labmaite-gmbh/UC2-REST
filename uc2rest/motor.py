@@ -496,15 +496,25 @@ class Motor(object):
             "task":path,
             "position":True,
         }
-        _position = np.array((0.,0.,0.,0.)) # T,X,Y,Z
         _physicalStepSizes = np.array((self.stepSizeA, self.stepSizeX, self.stepSizeY, self.stepSizeZ))
 
         # this may be an asynchronous call.. #FIXME!
         r = self._parent.post_json(path, payload, getReturn = True, nResponses=1)
-        if "motor" in r:
+        # A broken/timed-out exchange (post_json() returns the sentinel string
+        # "communication interrupted", or None if the reader thread had
+        # already stopped) must not be reported as "position (0,0,0,0)" -- that
+        # silently handed a fabricated position to callers (colision_avoidance
+        # ._move() trusts this to decide same-slot vs. different-slot routing)
+        # with no error anywhere to catch it, exactly the kind of confidently-
+        # wrong input that let a stage crash into the frame edges during a
+        # comms stall. Raise so the caller can tell "don't know" from
+        # "confirmed at (0,0,0,0)", matching isBusy()'s fix for the same bug.
+        try:
+            _position = np.array((0.,0.,0.,0.)) # T,X,Y,Z
             for index, istepper in enumerate(r["motor"]["steppers"]):
                 _position[istepper["stepperid"]]=istepper["position"]*_physicalStepSizes[self.motorAxisOrder[index]]
-
+        except Exception as e:
+            raise CommunicationError(f"get_position(): no valid response from ESP32 ({r!r}): {e}") from e
 
         return _position
 
