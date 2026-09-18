@@ -27,6 +27,28 @@ class Serial:
     _REOPEN_ATTEMPTS = 5
     _REOPEN_RETRY_DELAY_S = 0.3
 
+    # Bounds how long _process_commands() will wait for ANY response at all
+    # -- not just a garbled one -- to the command it just sent, before giving
+    # up on it and letting the dispatch loop move on to the next queued
+    # command. Total silence (zero bytes back) is a second, distinct way the
+    # dispatch gate used to freeze forever alongside a garbled response: with
+    # nothing ever received, reading_json never becomes True, so the
+    # "--"-terminated branch that marks a command done (see qeueIdSuccess)
+    # is never reached either.
+    #
+    # Must stay BELOW the tightest per-call timeout callers actually use in a
+    # hot loop -- Motor.isBusy()'s default of 1s, polled continuously by
+    # wait_for_move_complete() -- not above it. If this were >= that timeout,
+    # the caller gives up and post_json()'s single retry re-queues a second
+    # command under a new qid before the dispatch gate has been freed for the
+    # first one, so the retry (its own fresh ~1s budget, racing a gate that
+    # won't open for however much of this timeout is left) usually times out
+    # too, and the caller falls through to a full reconnect() instead of the
+    # plain silence recovery this exists to provide. See
+    # test_silence_timeout_is_below_motor_isbusy_poll_timeout, which pins
+    # this relationship so the two can't drift apart again unnoticed.
+    _SILENCE_TIMEOUT_S = 0.6
+
     def __init__(self, port, baudrate=115200, timeout=5,
                  identity="UC2_Feather", parent=None, DEBUG=False):
 
@@ -191,18 +213,23 @@ class Serial:
         nLineCountTimeout = 50 # maximum number of lines read before timeout
         lineCounter = 0
         lastTransmisionSuccess = True
+        # When the outstanding command (currentIdentifier) was sent, so total
+        # silence can be bounded the same way a garbled response already is
+        # -- see _SILENCE_TIMEOUT_S and the check just below the read.
+        t_sent = None
 
         qeueIdSuccess = {}
         t0 = time.time()
         while self.running:
-            
+
             # Check if the last command went through successfully
             if currentIdentifier is not None:
                 try: lastTransmisionSuccess = qeueIdSuccess[str(currentIdentifier)]
-                except: lastTransmisionSuccess = False 
+                except: lastTransmisionSuccess = False
             if not self.command_queue.empty() and not reading_json and lastTransmisionSuccess:
                 currentIdentifier, command = self.command_queue.get()
-                
+                t_sent = time.time()
+
                 if self.DEBUG: self._parent.logger.debug("Sending: "+ str(command))
                 json_command = json.dumps(command)
                 if currentIdentifier == 5:
@@ -242,7 +269,39 @@ class Serial:
                 if self.DEBUG and line!="": self._parent.logger.debug(line)
             except:
                 line = ""
-            if line == "++":
+            if line == "":
+                # Total silence -- zero bytes back for the command we sent,
+                # not even a garbled frame. reading_json never becomes True
+                # in this case, so the "--"-terminated branch below (which
+                # marks a command done after a garbled response) is never
+                # reached either: this is a second, distinct way the
+                # dispatch gate used to freeze forever. Bounded the same way,
+                # via _SILENCE_TIMEOUT_S, so a truly gone-silent link cannot
+                # strand every command queued after the one it swallowed.
+                if (currentIdentifier is not None and not reading_json
+                        and t_sent is not None
+                        and time.time() - t_sent > self._SILENCE_TIMEOUT_S):
+                    self._parent.logger.debug(
+                        f"No response at all for qid={currentIdentifier} after "
+                        f"{self._SILENCE_TIMEOUT_S:.0f}s of silence; unsticking "
+                        f"the dispatch queue.")
+                    with self.lock:
+                        qeueIdSuccess[str(currentIdentifier)] = 1
+                        try:
+                            self.responses[currentIdentifier].append({})
+                        except:
+                            self.responses[currentIdentifier] = [{}]
+                    # currentIdentifier must stay set to this qid (not be
+                    # reset to None) -- the dispatch gate at the top of the
+                    # loop only refreshes lastTransmisionSuccess when
+                    # currentIdentifier is not None, so resetting it here
+                    # would leave that gate stuck on its last (closed) value
+                    # forever instead of picking up the qeueIdSuccess update
+                    # just made above. Clearing t_sent alone is enough to
+                    # stop this check from re-firing on every idle loop
+                    # iteration once the timeout has already been handled.
+                    t_sent = None
+            elif line == "++":
                 reading_json = True
                 continue
             elif line == "--" or lineCounter>nLineCountTimeout:
