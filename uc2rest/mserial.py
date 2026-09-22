@@ -239,6 +239,10 @@ class Serial:
                     reset_ser.setRTS(True)   # EN low -- hold the chip in reset
                     time.sleep(0.1)
                     reset_ser.setRTS(False)  # EN high -- let it boot
+                # One good pulse is the whole job. Without this break the
+                # loop pulsed the board _REOPEN_ATTEMPTS times in a row,
+                # rebooting it again and again instead of recovering it.
+                break
             except PermissionError as e:
                 if attempt < self._REOPEN_ATTEMPTS - 1:
                     self._parent.logger.warning(

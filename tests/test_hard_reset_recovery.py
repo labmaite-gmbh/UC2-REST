@@ -111,14 +111,15 @@ def test_hard_reset_toggles_rts_low_then_high_and_returns_true(monkeypatch):
     monkeypatch.setattr("uc2rest.mserial.time.sleep", lambda *_: None)
 
     assert s.hard_reset("COM7") is True
-    # hard_reset() retries up to _REOPEN_ATTEMPTS times; all attempts that
-    # succeed without exception still toggle RTS, so all created instances
-    # should have the sequence. Verify at least one has it (typically all).
-    assert len(created) > 0
-    assert all(h.port == "COM7" for h in created)
+    # The retry loop exists for transient PermissionError only: one
+    # successful pulse must end it. Pulsing the board _REOPEN_ATTEMPTS
+    # times in a row reboots it repeatedly, which is the opposite of a
+    # recovery.
+    assert len(created) == 1, f"the board was pulsed {len(created)} times, expected 1"
+    assert created[0].port == "COM7"
     # EN held low (True passed to setRTS -- see hard_reset()'s own comment
     # on RTS polarity) then released (False) -- reset-then-run, in order.
-    assert all(h.rts_history == [True, False] for h in created)
+    assert created[0].rts_history == [True, False]
 
 
 def test_hard_reset_returns_false_without_raising_when_the_port_cannot_be_opened(monkeypatch):
