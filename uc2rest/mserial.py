@@ -411,7 +411,11 @@ class Serial:
                 # "++" only opens the frame; the JSON body and "--" follow
                 # with gaps. Consume them here so they can't leak into the
                 # reader thread started right after this check.
-                self._drain_frame(ser)
+                if not self._drain_frame(ser):
+                    self._parent.logger.debug(
+                        f"checkFirmware: firmware frame not terminated within "
+                        f"{self._FRAME_DRAIN_TIMEOUT_S:.1f}s; board may be "
+                        f"mid-reboot.")
                 self._freeSerialBuffer(ser)
                 return True
         return False
