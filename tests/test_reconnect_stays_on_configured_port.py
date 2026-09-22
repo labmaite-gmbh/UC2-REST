@@ -169,3 +169,52 @@ def test_try_to_connect_closes_the_handle_when_the_firmware_check_fails(monkeypa
     assert s.tryToConnect("COM4") is False
     assert closed == [True]
     assert s.serialdevice is None
+
+
+def test_port_scan_records_the_port_it_actually_found(monkeypatch):
+    """A startup scan that finds the board on a DIFFERENT port than the
+    configured one must record that port. Otherwise self.serialport keeps
+    the stale configured value, reconnect()'s scan_ok check
+    (self.serialport in (None, "NotConnected")) stays False, and every
+    later reconnect retries the wrong port _REOPEN_ATTEMPTS times before
+    falling through to a MockSerial and a CommunicationError -- forever,
+    since nothing ever updates the port either.
+    """
+    monkeypatch.setattr(Serial, "_REOPEN_RETRY_DELAY_S", 0.001)
+    s = _bare_serial(_FakeParent())
+    s.serialport = "COM4"
+    s.configured_port = "COM4"
+    ports = [
+        SimpleNamespace(device="COM4", description="CH340 (COM4)"),
+        SimpleNamespace(device="COM7", description="CH340 (COM7)"),
+    ]
+    monkeypatch.setattr(serial.tools.list_ports, "comports", lambda include_links=False: ports)
+
+    def _only_com7(port):
+        if port == "COM7":
+            s.serialdevice = _OpenableSer()
+            return True
+        return False
+
+    s.tryToConnect = _only_com7
+    s.hard_reset = lambda port: False
+
+    assert isinstance(s.findCorrectSerialDevice(), _OpenableSer)
+    assert s.serialport == "COM7"
+    assert s.configured_port == "COM7"
+
+    # ... and a reconnect after that scan must go back to COM7, not COM4.
+    asked = []
+
+    def _recording(port):
+        asked.append(port)
+        s.serialdevice = _OpenableSer()
+        return True
+
+    s.tryToConnect = _recording
+    s.findCorrectSerialDevice = lambda: pytest.fail("reconnect() must not re-scan")
+    try:
+        s.reconnect()
+        assert asked == ["COM7"], f"reconnect() retried the wrong port(s): {asked}"
+    finally:
+        _cleanup(s)

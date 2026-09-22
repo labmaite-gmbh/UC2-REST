@@ -266,6 +266,15 @@ class Serial:
                any(port.description.startswith(allowed_description) for allowed_description in descriptions_to_check):
                 if self.tryToConnect(port.device):
                     self.is_connected = True
+                    # Record where the board actually turned up. Leaving
+                    # self.serialport on the stale configured value made
+                    # reconnect()'s scan_ok test (serialport in (None,
+                    # "NotConnected")) False, so every later reconnect
+                    # retried the WRONG port with no scan allowed, fell
+                    # through to MockSerial and raised CommunicationError
+                    # -- permanently, since nothing else updates the port.
+                    self.serialport = port.device
+                    self.configured_port = port.device
                     return self.serialdevice
                 # The right chip signature/description was found on this
                 # port, but the firmware handshake failed -- the ESP32
@@ -280,6 +289,8 @@ class Serial:
                 if port.device == getattr(self, "configured_port", None) \
                         and self.hard_reset(port.device) and self.tryToConnect(port.device):
                     self.is_connected = True
+                    self.serialport = port.device
+                    self.configured_port = port.device
                     return self.serialdevice
 
         self.is_connected = False
