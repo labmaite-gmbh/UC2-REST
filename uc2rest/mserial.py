@@ -105,11 +105,24 @@ class Serial:
 
         try:
             isUC2 = False
-            for i in range(self._REOPEN_ATTEMPTS):
-                isUC2 = self.tryToConnect(port)
-                if isUC2:
-                    break
-                time.sleep(self._REOPEN_RETRY_DELAY_S)
+            # "NotConnected" is the sentinel findCorrectSerialDevice() writes
+            # to self.serialport when it couldn't find any real port -- and
+            # reconnect() always passes self.serialport straight back in
+            # here as `port`. Retrying tryToConnect() against that literal
+            # string (or against None, before any port has ever been found)
+            # can never succeed; it's not a device, just a placeholder. Every
+            # such reconnect wasted _REOPEN_ATTEMPTS x _REOPEN_RETRY_DELAY_S
+            # hitting "could not open port 'NotConnected'" before ever
+            # reaching the real port-scan below -- traced from a 2026-09-18
+            # live incident where a reconnect loop spent 15+ minutes cycling
+            # through exactly that without ever looking at the actual
+            # available ports.
+            if port not in (None, "NotConnected"):
+                for i in range(self._REOPEN_ATTEMPTS):
+                    isUC2 = self.tryToConnect(port)
+                    if isUC2:
+                        break
+                    time.sleep(self._REOPEN_RETRY_DELAY_S)
             if not isUC2:
                 raise ValueError('Wrong Firmware.')
             ser = self.serialdevice
@@ -147,6 +160,50 @@ class Serial:
         self.thread.start()
         return ser
 
+    # How long to let the ESP32 boot after hard_reset() toggles its EN pin
+    # before trying the firmware handshake again.
+    _HARD_RESET_BOOT_WAIT_S = 3.0
+
+    def hard_reset(self, port: str) -> bool:
+        """Reboots the ESP32 by toggling its EN/reset pin via RTS -- the
+        same mechanism esptool.py's HardReset uses for the classic
+        CH340/CP2102 dev-board auto-reset circuit findCorrectSerialDevice()
+        already targets (see uc2rest/updater.py's own `--after hard_reset`).
+        Deliberately leaves DTR alone: a DTR-assisted reset also pulls IO0
+        low, which is how esptool enters the flashing bootloader instead of
+        booting the actual firmware -- not what we want for a recovery.
+
+        Only useful when the physical link itself is fine but the firmware
+        is hung and not answering the handshake: a genuinely
+        disconnected/absent port has nothing to open here either, so this
+        returns False and lets the caller fall through to its existing
+        not-found handling rather than pretending to have recovered
+        anything.
+        """
+        # Retry with backoff for transient Windows PermissionError
+        for attempt in range(self._REOPEN_ATTEMPTS):
+            try:
+                with serial.Serial(port=port, baudrate=self.baudrate) as reset_ser:
+                    reset_ser.setRTS(True)   # EN low -- hold the chip in reset
+                    time.sleep(0.1)
+                    reset_ser.setRTS(False)  # EN high -- let it boot
+            except PermissionError as e:
+                if attempt < self._REOPEN_ATTEMPTS - 1:
+                    self._parent.logger.warning(
+                        f"hard_reset({port!r}) failed with PermissionError (attempt {attempt + 1}/{self._REOPEN_ATTEMPTS}), "
+                        f"retrying in {self._REOPEN_RETRY_DELAY_S}s: {e!r}")
+                    time.sleep(self._REOPEN_RETRY_DELAY_S)
+                    continue
+                else:
+                    self._parent.logger.error(
+                        f"hard_reset({port!r}) failed after {self._REOPEN_ATTEMPTS} attempts: {e!r}")
+                    return False
+            except Exception as e:
+                self._parent.logger.warning(f"hard_reset({port!r}) failed: {e!r}")
+                return False
+        time.sleep(self._HARD_RESET_BOOT_WAIT_S)
+        return True
+
     def findCorrectSerialDevice(self):
         _available_ports = serial.tools.list_ports.comports(include_links=False)
         ports_to_check = ["COM", "/dev/tt", "/dev/a", "/dev/cu.SLA", "/dev/cu.wchusb"]
@@ -156,6 +213,16 @@ class Serial:
             if any(port.device.startswith(allowed_port) for allowed_port in ports_to_check) or \
                any(port.description.startswith(allowed_description) for allowed_description in descriptions_to_check):
                 if self.tryToConnect(port.device):
+                    self.is_connected = True
+                    return self.serialdevice
+                # The right chip signature/description was found on this
+                # port, but the firmware handshake failed -- the ESP32
+                # itself may be hung rather than genuinely gone. Reset it
+                # over the same physical link and give the handshake one
+                # more chance once it's had time to reboot, before writing
+                # this port off and moving on to the next candidate (if
+                # any) or falling through to the "NotConnected" dummy.
+                if self.hard_reset(port.device) and self.tryToConnect(port.device):
                     self.is_connected = True
                     return self.serialdevice
 
@@ -430,7 +497,7 @@ class Serial:
         if nResponses <= 0 or not self.is_connected or not type(self.ser.BAUDRATES) is tuple:
             return identifier
         while self.running:
-            time.sleep(0.002)
+            time.sleep(0.005)
             elapsed = time.time() - t0
             if self.resetLastCommand or elapsed > timeout or not self.is_connected:
                 if elapsed > timeout and not self.resetLastCommand and self.is_connected:
@@ -480,7 +547,7 @@ class Serial:
         """
         self.running = False
         if self.thread is not None:
-            self.thread.join(timeout=1.0)
+            self.thread.join(timeout=2.0)
         try:
             self.ser.close()
         except:

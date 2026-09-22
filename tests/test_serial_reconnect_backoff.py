@@ -158,6 +158,60 @@ def test_reconnect_raises_if_it_falls_back_to_a_dummy_connection(monkeypatch):
         _cleanup(s)
 
 
+def test_open_device_skips_the_retry_loop_for_the_notconnected_sentinel(monkeypatch):
+    """findCorrectSerialDevice() sets self.serialport = "NotConnected" when
+    no real port was ever found, and reconnect() always passes
+    self.serialport straight back into openDevice() as `port`. Retrying
+    tryToConnect("NotConnected") -- a literal, un-openable string, not a
+    real device -- just wastes _REOPEN_ATTEMPTS x _REOPEN_RETRY_DELAY_S on
+    every single reconnect before it ever reaches the real port-scan.
+    Traced from a 2026-09-18 live incident where a reconnect loop spent
+    15+ minutes cycling through "could not open port 'NotConnected'"
+    without ever getting to look at the actual available ports."""
+    monkeypatch.setattr(Serial, "_REOPEN_RETRY_DELAY_S", 0.001)
+    parent = _FakeParent()
+    s = _bare_serial(parent)
+    s.tryToConnect = lambda port: pytest.fail(
+        "must not retry the literal 'NotConnected' sentinel -- go straight "
+        "to findCorrectSerialDevice()")
+
+    def _fake_find():
+        s.serialdevice = _OpenableSer()
+        s.is_connected = True
+        return s.serialdevice
+
+    s.findCorrectSerialDevice = _fake_find
+
+    try:
+        ser = s.openDevice(port="NotConnected", baud_rate=115200)
+        assert isinstance(ser, _OpenableSer)
+    finally:
+        _cleanup(s)
+
+
+def test_open_device_also_skips_the_retry_loop_when_no_port_is_known_yet(monkeypatch):
+    """port=None (the very first connection attempt, before any port has
+    ever been recorded) is the same case as the sentinel -- nothing to
+    retry against yet."""
+    monkeypatch.setattr(Serial, "_REOPEN_RETRY_DELAY_S", 0.001)
+    parent = _FakeParent()
+    s = _bare_serial(parent)
+    s.tryToConnect = lambda port: pytest.fail("must not retry with no known port")
+
+    def _fake_find():
+        s.serialdevice = _OpenableSer()
+        s.is_connected = True
+        return s.serialdevice
+
+    s.findCorrectSerialDevice = _fake_find
+
+    try:
+        ser = s.openDevice(port=None, baud_rate=115200)
+        assert isinstance(ser, _OpenableSer)
+    finally:
+        _cleanup(s)
+
+
 def test_reconnect_does_not_raise_when_it_genuinely_recovers(monkeypatch):
     monkeypatch.setattr(Serial, "_REOPEN_RETRY_DELAY_S", 0.001)
     parent = _FakeParent()
