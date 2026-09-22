@@ -80,15 +80,52 @@ class _FakeRtsSerial:
         self.port = port
         self.baudrate = baudrate
         self.rts_history = []
+        self.closed = False
 
     def setRTS(self, value):
         self.rts_history.append(value)
+
+    def open(self):
+        pass
+
+    def close(self):
+        self.closed = True
 
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
         return False
+
+
+class _RecordingRtsSerial:
+    """Records the ORDER of dtr/rts attribute assignment against open() and
+    the setRTS() pulse -- see test_open_port_without_reset_pulse.py's
+    _FakePySerial, of which this is hard_reset()'s counterpart."""
+
+    instances = []
+
+    def __init__(self, port=None, **kwargs):
+        assert port is None, "port must be set after construction, not passed to Serial()"
+        self.port = None
+        self.baudrate = None
+        self.events = []
+        self.closed = False
+        _RecordingRtsSerial.instances.append(self)
+
+    def __setattr__(self, name, value):
+        if name in ("dtr", "rts"):
+            self.__dict__.setdefault("events", []).append((name, value))
+        object.__setattr__(self, name, value)
+
+    def open(self):
+        self.events.append(("open", None))
+
+    def setRTS(self, value):
+        self.events.append(("setRTS", value))
+
+    def close(self):
+        self.closed = True
 
 
 class _FakePortInfo:
@@ -211,3 +248,30 @@ def test_find_correct_serial_device_does_not_hard_reset_when_no_port_matches(mon
 
     assert result is None
     assert s.serialport == "NotConnected"
+
+
+def test_hard_reset_holds_dtr_low_through_the_open(monkeypatch):
+    """serial.Serial(port=..., baudrate=...) opens immediately with BOTH
+    DTR and RTS asserted (measured 2026-09-22). On this board's auto-reset
+    circuit that already reboots the chip, and a DTR-assisted reset pulls
+    IO0 low -- which is how esptool enters the flashing bootloader instead
+    of the firmware. hard_reset() must open with both lines low and then
+    drive the EN pulse itself, exactly as its docstring promises."""
+    parent = _FakeParent()
+    s = _bare_serial(parent)
+    _RecordingRtsSerial.instances.clear()
+
+    monkeypatch.setattr("uc2rest.mserial.serial.Serial", _RecordingRtsSerial)
+    monkeypatch.setattr("uc2rest.mserial.time.sleep", lambda *_: None)
+
+    assert s.hard_reset("COM7") is True
+
+    assert len(_RecordingRtsSerial.instances) == 1
+    ser = _RecordingRtsSerial.instances[0]
+    assert ser.port == "COM7"
+    assert ser.baudrate == s.baudrate
+    open_idx = ser.events.index(("open", None))
+    assert ("dtr", False) in ser.events[:open_idx]
+    assert ("rts", False) in ser.events[:open_idx]
+    assert ser.events[open_idx + 1:] == [("setRTS", True), ("setRTS", False)]
+    assert ser.closed is True

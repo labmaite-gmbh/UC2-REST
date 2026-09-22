@@ -221,9 +221,15 @@ class Serial:
         same mechanism esptool.py's HardReset uses for the classic
         CH340/CP2102 dev-board auto-reset circuit findCorrectSerialDevice()
         already targets (see uc2rest/updater.py's own `--after hard_reset`).
-        Deliberately leaves DTR alone: a DTR-assisted reset also pulls IO0
-        low, which is how esptool enters the flashing bootloader instead of
-        booting the actual firmware -- not what we want for a recovery.
+        Deliberately leaves DTR de-asserted: a DTR-assisted reset also
+        pulls IO0 low, which is how esptool enters the flashing bootloader
+        instead of booting the actual firmware -- not what we want for a
+        recovery. serial.Serial(port=..., baudrate=...) opens immediately
+        with BOTH lines asserted (measured 2026-09-22: that open alone
+        reboots the board, and with DTR low it may come up in the
+        bootloader), so the handle is built unopened, both lines are set
+        low, and only then is it opened -- the same idiom _open_port()
+        uses. The EN pulse is then driven explicitly via setRTS().
 
         Only useful when the physical link itself is fine but the firmware
         is hung and not answering the handshake: a genuinely
@@ -234,11 +240,17 @@ class Serial:
         """
         # Retry with backoff for transient Windows PermissionError
         for attempt in range(self._REOPEN_ATTEMPTS):
+            reset_ser = None
             try:
-                with serial.Serial(port=port, baudrate=self.baudrate) as reset_ser:
-                    reset_ser.setRTS(True)   # EN low -- hold the chip in reset
-                    time.sleep(0.1)
-                    reset_ser.setRTS(False)  # EN high -- let it boot
+                reset_ser = serial.Serial()
+                reset_ser.port = port
+                reset_ser.baudrate = self.baudrate
+                reset_ser.dtr = False   # keep IO0 out of the bootloader
+                reset_ser.rts = False   # no reset pulse from the open() itself
+                reset_ser.open()
+                reset_ser.setRTS(True)   # EN low -- hold the chip in reset
+                time.sleep(0.1)
+                reset_ser.setRTS(False)  # EN high -- let it boot
                 # One good pulse is the whole job. Without this break the
                 # loop pulsed the board _REOPEN_ATTEMPTS times in a row,
                 # rebooting it again and again instead of recovering it.
@@ -257,6 +269,15 @@ class Serial:
             except Exception as e:
                 self._parent.logger.warning(f"hard_reset({port!r}) failed: {e!r}")
                 return False
+            finally:
+                # Never leave the handle open: a lingering one makes every
+                # following reopen of our own port fail with PermissionError
+                # (same failure tryToConnect() closes for).
+                try:
+                    if reset_ser is not None:
+                        reset_ser.close()
+                except Exception:
+                    pass
         time.sleep(self._HARD_RESET_BOOT_WAIT_S)
         return True
 
