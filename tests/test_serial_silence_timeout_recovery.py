@@ -16,6 +16,7 @@ move on to the next queued command.
 import json
 import queue
 import threading
+import time
 
 from uc2rest.mserial import Serial
 
@@ -24,6 +25,7 @@ class _RecordingLogger:
     def __init__(self):
         self.errors = []
         self.warnings = []
+        self.debugs = []
 
     def error(self, message):
         self.errors.append(message)
@@ -32,7 +34,7 @@ class _RecordingLogger:
         self.warnings.append(message)
 
     def debug(self, message):
-        pass
+        self.debugs.append(message)
 
 
 class _FakeParent:
@@ -127,6 +129,57 @@ def test_total_silence_does_not_freeze_later_commands():
             f"still stuck after the first command's total silence"
         )
         assert second.get("isbusy") == 0
+    finally:
+        s.running = False
+        s.thread.join(timeout=1)
+
+
+class _EchoOnceThenSilentSer:
+    """Answers the first write() with a single well-formed framed reply
+    (qid=1, matching the qid _bare_serial's identifier_counter=0 assigns to
+    the first command), then goes totally silent -- readline() returns b""
+    forever after. Reproduces a completed exchange followed by idle.
+
+    The scripted frame is only queued once write() has actually been
+    called: the reader thread spins on readline() well before the test's
+    sendMessage() enqueues anything, and if the frame were available from
+    __init__ it would be drained during that pre-enqueue idle spin instead
+    of being read as the real command's reply."""
+    BAUDRATES = (110, 300)
+
+    def __init__(self):
+        self._lines = []
+        self._written = False
+
+    def write(self, data: bytes):
+        if not self._written:
+            self._written = True
+            self._lines = ["++", '{"qid": 1, "motor": {"steppers": []}}', "--"]
+
+    def readline(self):
+        if self._lines:
+            return (self._lines.pop(0) + "\n").encode()
+        return b""
+
+
+def test_silence_timer_does_not_fire_after_a_completed_exchange(monkeypatch):
+    """A reply that arrived normally must not be followed, 0.6 s later, by a
+    spurious 'No response at all' placeholder for the same qid. Seen live
+    2026-09-22 on every idle poll: t_sent was never cleared on frame
+    completion, so the silence check re-fired against the finished qid."""
+    monkeypatch.setattr(Serial, "_SILENCE_TIMEOUT_S", 0.05)
+    parent = _FakeParent()
+    ser = _EchoOnceThenSilentSer()   # define alongside the file's other fakes
+    s = _bare_serial(ser, parent)
+    s.thread = threading.Thread(target=s._process_commands, daemon=True)
+    s.thread.start()
+    try:
+        r = s.sendMessage({"task": "/motor_get", "isbusy": 1}, nResponses=1, timeout=2)
+        assert isinstance(r, dict) and r.get("motor")
+        qid = s.identifier_counter
+        time.sleep(0.3)   # several silence windows of idle
+        assert s.responses[qid] == [r], f"junk appended after completion: {s.responses[qid]}"
+        assert not any("No response at all" in m for m in parent.logger.debugs)
     finally:
         s.running = False
         s.thread.join(timeout=1)

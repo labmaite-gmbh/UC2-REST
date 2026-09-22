@@ -460,6 +460,12 @@ class Serial:
                         self.responses[currentIdentifier].append(json_response.copy())
                 buffer = ""     # reset buffer
 
+                # The outstanding command has been answered (well-formed or
+                # not): stop the silence timer, otherwise it re-fires ~0.6 s
+                # later against this already-finished qid and appends a junk
+                # {} to its responses (seen on every idle poll, 2026-09-22).
+                t_sent = None
+
             if reading_json:
                 buffer += line
                 lineCounter +=1
