@@ -183,3 +183,62 @@ def test_silence_timer_does_not_fire_after_a_completed_exchange(monkeypatch):
     finally:
         s.running = False
         s.thread.join(timeout=1)
+
+
+class _HalfFrameThenEchoingSer:
+    """The first command gets a bare "++" and then nothing, ever. Every
+    command after it gets a normal, valid framed response.
+
+    This is the half-open-frame variant of _SilentThenEchoingSer: the board
+    opened the frame and died (or the rest of the frame was lost), so
+    reading_json is left True. The silence check used to be gated on
+    `not reading_json` and the lineCounter escape sat in an `elif` that a
+    blank line never reaches -- so the dispatch gate could never reopen.
+    """
+    BAUDRATES = (110, 300)
+
+    def __init__(self):
+        self._lines = []
+        self._seen_first = False
+
+    def write(self, data: bytes):
+        text = data.decode().strip()
+        if not text:
+            return
+        try:
+            cmd = json.loads(text)
+        except ValueError:
+            return
+        qid = cmd.get("qid")
+        if qid is None:
+            return
+        if not self._seen_first:
+            self._seen_first = True
+            self._lines += ["++"]   # frame opened and then total silence
+        else:
+            self._lines += ["++", json.dumps({"qid": qid, "isbusy": 0}), "--"]
+
+    def readline(self):
+        if self._lines:
+            return (self._lines.pop(0) + "\n").encode()
+        return b""
+
+
+def test_half_open_frame_then_silence_does_not_freeze_later_commands(monkeypatch):
+    monkeypatch.setattr(Serial, "_SILENCE_TIMEOUT_S", 0.05)
+    parent = _FakeParent()
+    s = _bare_serial(_HalfFrameThenEchoingSer(), parent)
+    s.thread = threading.Thread(target=s._process_commands, daemon=True)
+    s.thread.start()
+    try:
+        first = s.sendMessage({"task": "/motor_get", "isbusy": 1}, nResponses=1, timeout=1.0)
+        assert first == {}
+
+        second = s.sendMessage({"task": "/motor_get", "isbusy": 1}, nResponses=1, timeout=2.0)
+        assert isinstance(second, dict), (
+            f"expected a real response, got {second!r} -- the dispatch gate "
+            f"is still stuck inside the half-open frame")
+        assert second.get("isbusy") == 0
+    finally:
+        s.running = False
+        s.thread.join(timeout=1)

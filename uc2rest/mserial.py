@@ -446,7 +446,13 @@ class Serial:
                 # dispatch gate used to freeze forever. Bounded the same way,
                 # via _SILENCE_TIMEOUT_S, so a truly gone-silent link cannot
                 # strand every command queued after the one it swallowed.
-                if (currentIdentifier is not None and not reading_json
+                # Deliberately NOT gated on `not reading_json`: a board that
+                # sends "++" and then dies leaves reading_json True forever,
+                # and the lineCounter>nLineCountTimeout escape below sits in
+                # an `elif` a blank line can never reach -- so that gate had
+                # no way back open at all. The half-open frame is abandoned
+                # (buffer/lineCounter/reading_json reset) along with the qid.
+                if (currentIdentifier is not None
                         and t_sent is not None
                         and time.time() - t_sent > self._SILENCE_TIMEOUT_S):
                     self._parent.logger.debug(
@@ -469,6 +475,9 @@ class Serial:
                     # stop this check from re-firing on every idle loop
                     # iteration once the timeout has already been handled.
                     t_sent = None
+                    reading_json = False
+                    buffer = ""
+                    lineCounter = 0
             elif line == "++":
                 reading_json = True
                 continue
