@@ -262,7 +262,7 @@ def test_reconnect_stops_the_old_reader_thread_before_reopening():
 
     calls = []
 
-    def _fake_open_device(port=None, baud_rate=115200):
+    def _fake_open_device(port=None, baud_rate=115200, allow_port_scan=True):
         calls.append((port, baud_rate))
         # openDevice() always leaves a fresh reader thread running on the
         # new connection -- reproduce that much of its contract here.

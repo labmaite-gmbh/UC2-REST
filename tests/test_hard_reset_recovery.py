@@ -50,6 +50,7 @@ def _bare_serial(parent) -> Serial:
     s = Serial.__new__(Serial)
     s.ser = None
     s.serialport = "COM4"
+    s.configured_port = "COM4"  # overridden per-test where the scanned port differs
     s.baudrate = 115200
     s.timeout = 5
     s._parent = parent
@@ -138,6 +139,7 @@ def test_find_correct_serial_device_hard_resets_and_retries_before_giving_up(mon
     hard_reset() + one retried handshake before the scan gives up on it."""
     parent = _FakeParent()
     s = _bare_serial(parent)
+    s.configured_port = "COM7"  # the port findCorrectSerialDevice() scans here
 
     monkeypatch.setattr(
         "uc2rest.mserial.serial.tools.list_ports.comports",

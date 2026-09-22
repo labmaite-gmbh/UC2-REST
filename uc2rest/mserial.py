@@ -65,6 +65,11 @@ class Serial:
 
         self.ser = None
         self.serialport = port
+        # The port the operator configured. reconnect() must stay on it, and
+        # findCorrectSerialDevice() may only hard-reset THIS port -- on
+        # 2026-09-20 a failed reopen of COM4 led to hard_reset() attempts on
+        # COM3 and COM8, which belong to other instruments.
+        self.configured_port = port
         self.baudrate = baudrate
         self.timeout = timeout
         self._parent = parent
@@ -134,7 +139,7 @@ class Serial:
                 return True
         return False
 
-    def openDevice(self, port=None, baud_rate=115200):
+    def openDevice(self, port=None, baud_rate=115200, allow_port_scan=True):
         try: # try to close an eventually open serial connection
             if str(type(self.ser)) != "<class 'uc2rest.mserial.MockSerial'>":
                 self.ser.close()
@@ -167,7 +172,13 @@ class Serial:
             
         except Exception as e:
             self._parent.logger.error(e)
-            ser = self.findCorrectSerialDevice()
+            if allow_port_scan:
+                ser = self.findCorrectSerialDevice()
+            else:
+                self._parent.logger.error(
+                    f"reconnect: could not reopen {port!r} after {self._REOPEN_ATTEMPTS} "
+                    f"attempts; not scanning other ports (they are not this board).")
+                ser = None
             if ser is None:
                 ser = MockSerial(port, baud_rate, timeout=.1)
                 self.is_connected = False
@@ -258,7 +269,11 @@ class Serial:
                 # more chance once it's had time to reboot, before writing
                 # this port off and moving on to the next candidate (if
                 # any) or falling through to the "NotConnected" dummy.
-                if self.hard_reset(port.device) and self.tryToConnect(port.device):
+                # Only ever reset the board we were configured for. A
+                # non-answering CH340/CP2102 on another port is someone
+                # else's instrument.
+                if port.device == getattr(self, "configured_port", None) \
+                        and self.hard_reset(port.device) and self.tryToConnect(port.device):
                     self.is_connected = True
                     return self.serialdevice
 
@@ -297,8 +312,17 @@ class Serial:
                 self.is_connected = True
                 self.NumberRetryReconnect = 0
                 return True
-            else:
-                False
+            # Handshake failed (after a board reboot the first 10 lines are
+            # boot log, not "++"). Release the handle NOW: leaving it open in
+            # self.serialdevice made every following reopen of our own port
+            # fail with PermissionError until the object was garbage-collected
+            # -- the 2026-09-20 capture's intermittent "Access is denied"
+            # bursts mid-scan, with 189 successful reopens in between.
+            try:
+                self.serialdevice.close()
+            except Exception:
+                pass
+            self.serialdevice = None
 
         except Exception as e:
             self._parent.logger.debug(f"Trying out port {port} failed")
@@ -619,7 +643,13 @@ class Serial:
             self.ser.close()
         except:
             pass
-        self.ser = self.openDevice(port=self.serialport, baud_rate=self.baudrate)
+        # Scan other ports only if we never had a real one (startup failed
+        # to find the board). A known port is retried and, if it will not
+        # reopen, reconnect() fails loudly below -- it never wanders off to
+        # other instruments' COM ports.
+        scan_ok = self.serialport in (None, "NotConnected")
+        self.ser = self.openDevice(port=self.serialport, baud_rate=self.baudrate,
+                                   allow_port_scan=scan_ok)
         # is_connected is not a reliable signal here: _process_commands()'s
         # own thread (just started by openDevice()) flips it back to True
         # for any non-None self.ser, dummy included, as soon as it runs its
