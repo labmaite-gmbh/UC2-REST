@@ -174,16 +174,19 @@ def test_find_correct_serial_device_still_falls_through_when_reset_does_not_help
     documented "NotConnected" fallback as before."""
     parent = _FakeParent()
     s = _bare_serial(parent)
+    s.configured_port = "COM7"  # the port findCorrectSerialDevice() scans here
 
     monkeypatch.setattr(
         "uc2rest.mserial.serial.tools.list_ports.comports",
         lambda include_links=False: [_FakePortInfo("COM7", "CH340")])
 
+    reset_calls = []
     s.tryToConnect = lambda port: False  # never recovers, reset or not
-    s.hard_reset = lambda port: True
+    s.hard_reset = lambda port: reset_calls.append(port) or True
 
     result = s.findCorrectSerialDevice()
 
+    assert reset_calls == ["COM7"]
     assert result is None
     assert s.is_connected is False
     assert s.serialport == "NotConnected"
