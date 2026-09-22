@@ -267,9 +267,30 @@ class Serial:
         self.serialdevice = None
         self._parent.logger.debug("No USB device connected! Using DUMMY!")
 
+    def _open_port(self, port):
+        """Open `port` without the DTR/RTS pulse pyserial applies on open().
+
+        On the CH340/CP2102 auto-reset circuit this board carries (the one
+        hard_reset() drives on purpose) that pulse reboots the ESP32, so a
+        plain reconnect() cost a firmware reboot, seconds of silence, boot
+        text on the wire and the first command after it (2026-09-20
+        capture: "Serial command timed out ... qid=1" x189). Setting the
+        line states on an unopened Serial() and opening afterwards keeps
+        both lines low through the open.
+        """
+        ser = serial.Serial()
+        ser.port = port
+        ser.baudrate = self.baudrate
+        ser.timeout = self.read_timeout
+        ser.write_timeout = self.write_timeout
+        ser.dtr = False
+        ser.rts = False
+        ser.open()
+        return ser
+
     def tryToConnect(self, port):
         try:
-            self.serialdevice = serial.Serial(port=port, baudrate=self.baudrate, timeout=self.read_timeout, write_timeout=self.write_timeout)
+            self.serialdevice = self._open_port(port)
             time.sleep(T_SERIAL_WARMUP)
             self._freeSerialBuffer(self.serialdevice)
             if self.checkFirmware(self.serialdevice):
