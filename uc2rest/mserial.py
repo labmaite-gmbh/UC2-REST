@@ -63,6 +63,16 @@ class Serial:
     # empty. Require this many consecutive empty reads (~100 ms of silence).
     _QUIET_READS_REQUIRED = 5
 
+    # How many recent qids' bookkeeping (responses/commands) to keep around.
+    # sendMessage() drops each exchange's own entries as it returns, so in
+    # normal operation both dicts hold only what is genuinely in flight;
+    # this bounds the leftovers from the paths that never collect a reply
+    # (fire-and-forget nResponses<=0, callers that time out and walk away).
+    # Since qids now persist for the whole process lifetime (see
+    # identifier_counter), without this the two dicts grew monotonically --
+    # hundreds of thousands of entries over a 24 h run.
+    _RESPONSE_HISTORY = 256
+
     def __init__(self, port, baudrate=115200, timeout=5,
                  identity="UC2_Feather", parent=None, DEBUG=False):
 
@@ -397,7 +407,23 @@ class Serial:
 
     def _generate_identifier(self):
         self.identifier_counter += 1
+        self._prune_history(self.identifier_counter)
         return self.identifier_counter
+
+    def _prune_history(self, identifier):
+        """Forget bookkeeping for qids older than _RESPONSE_HISTORY.
+
+        Anything that far behind the current qid can no longer be collected
+        by a caller: sendMessage() either already popped its own entries or
+        gave up on them long ago."""
+        cutoff = identifier - self._RESPONSE_HISTORY
+        if cutoff <= 0:
+            return
+        with self.lock:
+            for store in (self.responses, self.commands):
+                for key in [k for k in list(store)
+                            if isinstance(k, int) and 0 < k < cutoff]:
+                    store.pop(key, None)
 
     def _process_commands(self):
         buffer = ""
@@ -525,6 +551,7 @@ class Serial:
                     self._parent.logger.debug("Failed to load the json from serial")
                     json_response = {}
 
+                unsolicited = False
                 with self.lock:
                     # The command this exchange answers is whichever qid the
                     # response carries, or -- when it didn't parse, or parsed
@@ -545,21 +572,36 @@ class Serial:
                     # experiment after exactly one "Failed to load the json
                     # from serial".
                     qid = json_response.get("qid", currentIdentifier)
-                    if qid is not None:
-                        qeueIdSuccess[str(qid)] = 1
-                        currentIdentifier = qid
-                    try:
-                        self.responses[currentIdentifier].append(json_response.copy())
-                    except:
-                        self.responses[currentIdentifier] = list()
-                        self.responses[currentIdentifier].append(json_response.copy())
+                    if qid == -1:
+                        # An unsolicited frame: the firmware tags its
+                        # broadcasts/async notifications qid=-1, and the
+                        # callbacks run just above are their only consumer.
+                        # Storing them under responses[-1] grew that one
+                        # list for the life of the process and nothing ever
+                        # read it. It is also not an answer to whatever
+                        # command is outstanding, so currentIdentifier,
+                        # qeueIdSuccess and the silence timer are all left
+                        # alone here.
+                        unsolicited = True
+                    else:
+                        if qid is not None:
+                            qeueIdSuccess[str(qid)] = 1
+                            currentIdentifier = qid
+                        try:
+                            self.responses[currentIdentifier].append(json_response.copy())
+                        except:
+                            self.responses[currentIdentifier] = list()
+                            self.responses[currentIdentifier].append(json_response.copy())
                 buffer = ""     # reset buffer
 
                 # The outstanding command has been answered (well-formed or
                 # not): stop the silence timer, otherwise it re-fires ~0.6 s
                 # later against this already-finished qid and appends a junk
                 # {} to its responses (seen on every idle poll, 2026-09-22).
-                t_sent = None
+                # Not for an unsolicited frame: that one answered nothing,
+                # so the outstanding command still needs its silence timer.
+                if not unsolicited:
+                    t_sent = None
 
             if reading_json:
                 buffer += line
@@ -654,13 +696,26 @@ class Serial:
                         f"(qid={identifier}, task={task}, wanted {nResponses} response(s)); "
                         f"giving up.")
                 self.resetLastCommand = False
+                # This exchange is over as far as the caller is concerned;
+                # keeping its bookkeeping only grows responses/commands for
+                # the life of the process (qids never restart -- see
+                # identifier_counter).
+                with self.lock:
+                    self.responses.pop(identifier, None)
+                    self.commands.pop(identifier, None)
                 return "communication interrupted"
             with self.lock:
                 if identifier in self.responses:
                     if len(self.responses[identifier])==nResponses:
-                        return self.responses[identifier][-1]
+                        reply = self.responses[identifier][-1]
+                        self.responses.pop(identifier, None)
+                        self.commands.pop(identifier, None)
+                        return reply
                 if -identifier in self.responses:
                     self._parent.logger.debug("You have sent the wrong command!")
+                    self.responses.pop(identifier, None)
+                    self.responses.pop(-identifier, None)
+                    self.commands.pop(identifier, None)
                     return "Wrong Command"
 
     def interruptCurrentSerialCommunication(self):

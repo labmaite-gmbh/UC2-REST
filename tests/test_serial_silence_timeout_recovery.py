@@ -178,7 +178,12 @@ def test_silence_timer_does_not_fire_after_a_completed_exchange(monkeypatch):
         assert isinstance(r, dict) and r.get("motor")
         qid = s.identifier_counter
         time.sleep(0.3)   # several silence windows of idle
-        assert s.responses[qid] == [r], f"junk appended after completion: {s.responses[qid]}"
+        # sendMessage() drops the exchange's own bookkeeping as it returns
+        # (see _RESPONSE_HISTORY), so the entry is gone by now -- anything
+        # present under this qid was written AFTER completion, which is
+        # exactly the junk placeholder this test exists to catch.
+        assert s.responses.get(qid, []) == [], (
+            f"junk appended after completion: {s.responses.get(qid)}")
         assert not any("No response at all" in m for m in parent.logger.debugs)
     finally:
         s.running = False
