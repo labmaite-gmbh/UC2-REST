@@ -49,6 +49,17 @@ class Serial:
     # this relationship so the two can't drift apart again unnoticed.
     _SILENCE_TIMEOUT_S = 0.6
 
+    # checkFirmware() sends /state_get and must read the WHOLE framed reply
+    # ("++" ... json ... "--"), not just up to "++". Anything left behind is
+    # read by the fresh _process_commands() thread and attributed to the
+    # first real command sent after the reopen -- on 2026-09-21 isBusy()
+    # received the state dict that way. Bounds how long that drain may take.
+    _FRAME_DRAIN_TIMEOUT_S = 1.0
+    # The board writes a multi-line reply with gaps longer than the 20 ms
+    # read timeout, so ONE empty readline() does not mean the buffer is
+    # empty. Require this many consecutive empty reads (~100 ms of silence).
+    _QUIET_READS_REQUIRED = 5
+
     def __init__(self, port, baudrate=115200, timeout=5,
                  identity="UC2_Feather", parent=None, DEBUG=False):
 
@@ -90,20 +101,38 @@ class Serial:
         self.resetLastCommand = True
 
     def _freeSerialBuffer(self, ser, timeout=5):
+        """Discard whatever is in the input buffer. Returns once the line has
+        been quiet for _QUIET_READS_REQUIRED consecutive reads, or after
+        `timeout` seconds."""
         t0 = time.time()
-        # free up any old data
-        while True:
+        quiet = 0
+        while time.time() - t0 < timeout:
             try:
                 readLine = ser.readline().decode('utf-8').strip()
-                if self.DEBUG: self._parent.logger.debug(readLine)
-                if readLine == "":
-                    break
+                if self.DEBUG and readLine: self._parent.logger.debug(readLine)
             except Exception as e:
                 if self.DEBUG: self._parent.logger.debug(e)
+                readLine = ""
+            if readLine == "":
+                quiet += 1
+                if quiet >= self._QUIET_READS_REQUIRED:
+                    return
+            else:
+                quiet = 0
 
-                pass
-            if time.time()-t0 > timeout:
-                return
+    def _drain_frame(self, ser, timeout=None) -> bool:
+        """Read and discard lines until the "--" that closes a framed reply.
+        True if the terminator was seen, False on timeout."""
+        timeout = self._FRAME_DRAIN_TIMEOUT_S if timeout is None else timeout
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            try:
+                line = ser.readline().decode('utf-8').strip()
+            except Exception:
+                continue
+            if line == "--":
+                return True
+        return False
 
     def openDevice(self, port=None, baud_rate=115200):
         try: # try to close an eventually open serial connection
@@ -271,6 +300,10 @@ class Serial:
             mReadline = ser.readline()
             if self.DEBUG: self._parent.logger.debug(mReadline)
             if mReadline.decode('utf-8').strip() == "++":
+                # "++" only opens the frame; the JSON body and "--" follow
+                # with gaps. Consume them here so they can't leak into the
+                # reader thread started right after this check.
+                self._drain_frame(ser)
                 self._freeSerialBuffer(ser)
                 return True
         return False
