@@ -30,6 +30,16 @@ class Serial:
     _REOPEN_ATTEMPTS = 8
     _REOPEN_RETRY_DELAY_S = 0.5
 
+    # ... but openDevice() bounds the reopen by WALL CLOCK, not by attempt
+    # count, because the two failure modes cost wildly different amounts
+    # per attempt. A PermissionError comes back instantly (8 attempts ~ 4 s,
+    # as intended), while a port that opens and then fails the handshake
+    # costs T_SERIAL_WARMUP + buffer flush + firmware check + delay
+    # (~2.3 s), so the same 8 attempts ran ~18 s -- all of it holding
+    # lm_hardware's shared serial lock, which blocks every other hw_id.
+    # _REOPEN_ATTEMPTS/_REOPEN_RETRY_DELAY_S still govern hard_reset().
+    _REOPEN_BUDGET_S = 4.0
+
     # Bounds how long _process_commands() will wait for ANY response at all
     # -- not just a garbled one -- to the command it just sent, before giving
     # up on it and letting the dispatch loop move on to the next queued
@@ -173,9 +183,10 @@ class Serial:
             # through exactly that without ever looking at the actual
             # available ports.
             if port not in (None, "NotConnected"):
-                for i in range(self._REOPEN_ATTEMPTS):
+                t0 = time.time()
+                while True:
                     isUC2 = self.tryToConnect(port)
-                    if isUC2:
+                    if isUC2 or time.time() - t0 >= self._REOPEN_BUDGET_S:
                         break
                     time.sleep(self._REOPEN_RETRY_DELAY_S)
             if not isUC2:
@@ -189,8 +200,9 @@ class Serial:
                 ser = self.findCorrectSerialDevice()
             else:
                 self._parent.logger.error(
-                    f"reconnect: could not reopen {port!r} after {self._REOPEN_ATTEMPTS} "
-                    f"attempts. A persistent 'Access is denied' means another program "
+                    f"reconnect: could not reopen {port!r} within "
+                    f"{self._REOPEN_BUDGET_S:.0f}s. "
+                    f"A persistent 'Access is denied' means another program "
                     f"(browser Web Serial tab, serial monitor, second ImSwitch/API instance) "
                     f"holds the port; not scanning other ports (they are not this board).")
                 ser = None

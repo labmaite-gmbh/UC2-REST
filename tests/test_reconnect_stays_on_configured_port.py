@@ -92,6 +92,7 @@ def _cleanup(s):
 
 def test_reconnect_of_a_known_port_does_not_port_scan(monkeypatch):
     monkeypatch.setattr(Serial, "_REOPEN_RETRY_DELAY_S", 0.001)
+    monkeypatch.setattr(Serial, "_REOPEN_BUDGET_S", 0.05)   # wall-clock window
     s = _bare_serial(_FakeParent())
     s.tryToConnect = lambda port: False  # COM4 stays busy for the whole retry window
     s.findCorrectSerialDevice = lambda: pytest.fail("reconnect() must not scan other ports")

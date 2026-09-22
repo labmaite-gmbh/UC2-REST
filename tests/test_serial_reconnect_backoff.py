@@ -19,6 +19,7 @@ like call_with_retry finds out the reconnect failed instead of silently
 retrying against a fake connection that can never respond).
 """
 import queue
+import time
 import threading
 
 import pytest
@@ -125,6 +126,9 @@ def test_open_device_still_falls_back_to_a_dummy_after_genuinely_exhausting_retr
     """A port that's actually gone (not just transiently busy) must still
     end up on the documented dummy/no-device fallback, not retry forever."""
     monkeypatch.setattr(Serial, "_REOPEN_RETRY_DELAY_S", 0.001)
+    # The reopen window is wall-clock now (_REOPEN_BUDGET_S), so shrinking
+    # the delay alone no longer makes an exhausted retry loop fast.
+    monkeypatch.setattr(Serial, "_REOPEN_BUDGET_S", 0.05)
     parent = _FakeParent()
     s = _bare_serial(parent)
     s.tryToConnect = lambda port: False
@@ -146,6 +150,7 @@ def test_reconnect_raises_if_it_falls_back_to_a_dummy_connection(monkeypatch):
     esp32_conn.py's call_with_retry must be told the reconnect failed, not
     proceed to retry against a fake connection that will never respond."""
     monkeypatch.setattr(Serial, "_REOPEN_RETRY_DELAY_S", 0.001)
+    monkeypatch.setattr(Serial, "_REOPEN_BUDGET_S", 0.05)   # wall-clock window
     parent = _FakeParent()
     s = _bare_serial(parent)
     s.tryToConnect = lambda port: False
@@ -232,5 +237,37 @@ def test_reconnect_does_not_raise_when_it_genuinely_recovers(monkeypatch):
 def test_reopen_window_covers_a_slow_handle_release():
     """A COM handle on Windows can stay busy for a couple of seconds after
     close() (2026-09-20 capture: PermissionError through all 5 x 0.3 s
-    attempts). The retry window must be at least 3 s."""
-    assert Serial._REOPEN_ATTEMPTS * Serial._REOPEN_RETRY_DELAY_S >= 3.0
+    attempts). The retry window must be at least 3 s -- and it is now a
+    wall-clock window, not an attempt count (see _REOPEN_BUDGET_S)."""
+    assert Serial._REOPEN_BUDGET_S >= 3.0
+
+
+def test_reopen_window_is_bounded_by_wall_clock_not_by_attempt_count(monkeypatch):
+    """The fast failure (PermissionError, instant) and the slow one (the
+    port opens but the handshake fails: T_SERIAL_WARMUP + flush + check,
+    ~2.3 s each) cost wildly different amounts per attempt. Counting
+    attempts let the slow path run ~18 s while holding lm_hardware's shared
+    serial lock; the budget must bound the total instead."""
+    monkeypatch.setattr(Serial, "_REOPEN_BUDGET_S", 0.5)
+    monkeypatch.setattr(Serial, "_REOPEN_RETRY_DELAY_S", 0.001)
+    parent = _FakeParent()
+    s = _bare_serial(parent)
+    attempts = []
+
+    def _slow_failing_try_to_connect(port):
+        attempts.append(port)
+        time.sleep(0.3)
+        return False
+
+    s.tryToConnect = _slow_failing_try_to_connect
+    s.findCorrectSerialDevice = lambda: None
+
+    t0 = time.time()
+    try:
+        s.openDevice(port="COM4", baud_rate=115200)
+    finally:
+        _cleanup(s)
+    elapsed = time.time() - t0
+
+    assert elapsed < 1.0, f"openDevice() took {elapsed:.2f}s, budget is 0.5s"
+    assert 1 <= len(attempts) <= 3, f"{len(attempts)} attempts inside a 0.5s budget"
