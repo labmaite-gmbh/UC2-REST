@@ -74,6 +74,14 @@ class Serial:
 
         self.callBackList = []
 
+        # qid counter for the whole life of this Serial object. Deliberately
+        # NOT reset by openDevice()/reconnect(): the board keeps answering
+        # commands that were in flight when the port was reopened, and those
+        # answers carry the qid they were sent with. Restarting at 0 made a
+        # late ack for an old qid land on a brand-new command reusing that
+        # number (2026-09-21: get_position() received {'qid': 6, 'success': 1}).
+        self.identifier_counter = 0
+
         # initialize serial connection
         self.thread = None
         self.ser = self.openDevice(port, baudrate)
@@ -155,7 +163,6 @@ class Serial:
         except:
             pass
         self.running = True
-        self.identifier_counter = 0 # Counter for generating unique identifiers
         self.thread = threading.Thread(target=self._process_commands)
         self.thread.start()
         return ser
