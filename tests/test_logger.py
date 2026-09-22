@@ -120,3 +120,24 @@ def test_post_json_retry_path_does_not_crash_with_the_real_logger():
 
     assert isinstance(result, dict)
     assert result.get("isbusy") == 0
+
+
+def test_logger_messages_reach_loguru_sinks():
+    """uc2rest's own messages ('Wrong Firmware.', 'Serial command timed
+    out ...') were print()-only, so they never reached the file sink the
+    API process adds and were missing from the 2026-09-21 post-mortem."""
+    import loguru
+
+    captured = []
+    sink_id = loguru.logger.add(lambda m: captured.append(m.record), level="DEBUG")
+    try:
+        Logger().error("Wrong Firmware.")
+        Logger().warning("Serial command timed out after 1.0s")
+        Logger().debug("No response at all for qid=7")
+    finally:
+        loguru.logger.remove(sink_id)
+
+    levels = {r["message"]: r["level"].name for r in captured}
+    assert levels["Wrong Firmware."] == "ERROR"
+    assert levels["Serial command timed out after 1.0s"] == "WARNING"
+    assert levels["No response at all for qid=7"] == "DEBUG"
