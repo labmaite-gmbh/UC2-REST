@@ -228,3 +228,9 @@ def test_reconnect_does_not_raise_when_it_genuinely_recovers(monkeypatch):
         assert s.is_connected is True
     finally:
         _cleanup(s)
+
+def test_reopen_window_covers_a_slow_handle_release():
+    """A COM handle on Windows can stay busy for a couple of seconds after
+    close() (2026-09-20 capture: PermissionError through all 5 x 0.3 s
+    attempts). The retry window must be at least 3 s."""
+    assert Serial._REOPEN_ATTEMPTS * Serial._REOPEN_RETRY_DELAY_S >= 3.0

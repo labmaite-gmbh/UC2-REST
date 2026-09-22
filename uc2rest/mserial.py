@@ -24,8 +24,11 @@ class Serial:
     # findCorrectSerialDevice()'s port-scan and then a silent MockSerial
     # "dummy" fallback, with no exception raised anywhere. A short backoff
     # between attempts lets the transient case clear before giving up.
-    _REOPEN_ATTEMPTS = 5
-    _REOPEN_RETRY_DELAY_S = 0.3
+    # 2026-09-20 capture shows PermissionError persisting through 1.5 s (5 x 0.3).
+    # With Task 4, a failure here does not fall back to port-scanning (no other
+    # board to try) -- it must allow enough time for genuine slow handle release.
+    _REOPEN_ATTEMPTS = 8
+    _REOPEN_RETRY_DELAY_S = 0.5
 
     # Bounds how long _process_commands() will wait for ANY response at all
     # -- not just a garbled one -- to the command it just sent, before giving
@@ -177,7 +180,9 @@ class Serial:
             else:
                 self._parent.logger.error(
                     f"reconnect: could not reopen {port!r} after {self._REOPEN_ATTEMPTS} "
-                    f"attempts; not scanning other ports (they are not this board).")
+                    f"attempts. A persistent 'Access is denied' means another program "
+                    f"(browser Web Serial tab, serial monitor, second ImSwitch/API instance) "
+                    f"holds the port; not scanning other ports (they are not this board).")
                 ser = None
             if ser is None:
                 ser = MockSerial(port, baud_rate, timeout=.1)
